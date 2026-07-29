@@ -1,0 +1,7 @@
+pyserial
+numpy
+pandas
+scikit-learn
+joblib
+websockets
+matplotlib
