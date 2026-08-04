@@ -565,12 +565,21 @@ is the real test of whether bug 2 in particular is fully resolved (see §18).
 | `evaluate_holdout.py` | True held-out evaluation: train on named sessions, test on a different named session (the "is this new session usable" check, used for every part_5-8) |
 | `analyze_model.py` | Produces the numbers behind a trained model as JSON (fold accuracy, feature importance, class balance, motion-energy distributions) — built for an early Artifact visualization, now somewhat superseded by later analysis but still functional |
 | `compare_models.py` | Compares 6 ML model families (RF, GB, LR, SVM×2, KNN) under identical LOSO methodology |
+| `model_evaluation.py` | Produces `model_evaluation_report.pdf` — confusion matrix, feature correlation matrix, two overfitting diagnostics, RAG health summary (§20) |
+| `csi_label_collector.py` | Auto-cycling data collector (leave/empty/moving protocol) — copied into the repo root as part of §19's GitHub prep, originally lived outside this folder |
+| `csi_live_monitor.py` | Pre-model live waterfall + motion-energy verification tool — same origin note as above |
 | `csi_live_predict.py` | Matplotlib-based live inference: waterfall + real-time prediction, with the same calibration/smoothing/rolling-recal logic as the web version. Press 'r' to force recalibration. |
 | `csi_live_server.py` | Python WebSocket backend for the web dashboard: serial → calibrated prediction → browser, with a bidirectional control channel (client can request `recalibrate`) |
 | `csi_dashboard.html` | Browser dashboard: canvas waterfall, energy sparkline (with hover), prediction badge, session summary, calibration status + manual recalibrate button, theme toggle, about-this-system explainer |
 | `csi_model.joblib` | The deployed model + metadata (`amp_columns`, `feature_names`, `window_seconds`, `calib_seconds`, `frame_hz`) |
 | `report/csi_report.tex` | LaTeX writeup for Overleaf, covering roughly §1-§11 of this document (predates order-invariant features and the live-bug fixes) |
-| `PROJECT_HISTORY.md` | This file |
+| `report/csi_file_inventory.tex` | A separate LaTeX file-inventory doc found already present when the repo was prepared (§19) — origin predates the active context at that point, likely from an earlier, since-summarized part of this same ongoing project |
+| `README.md` | GitHub-facing overview: architecture diagram, results, setup instructions, limitations |
+| `LICENSE` | MIT |
+| `.gitignore` | Excludes `build/`, the legacy contaminated dataset, secrets, regenerable output |
+| `requirements.txt` | Python dependencies for all the tool scripts |
+| `docs/PROJECT_HISTORY.md` | This file |
+| `CLAUDE.md` (repo root) | Short pointer file, auto-loaded by Claude Code at the start of every session in this folder — summarizes current state and directs to this file for full detail |
 
 ### Recording sessions in detail
 
@@ -622,33 +631,50 @@ current, authoritative layout.
 
 ---
 
-## 18. Open items / recommended next steps (in the order they were being
-considered as of this writing)
+## 18. Open items / recommended next steps
 
-1. **Extended live soak test** — leave the dashboard running for hours,
-   unattended, in normal use. This is the real test of whether §15's bug 2
-   (rolling-recalibration drift) is actually fixed, not just improved on a
-   short test.
-2. **The cross-room held-out test that was planned but never executed**:
-   record one real session in a second room (name it clearly by room, e.g.
+**Current #1 priority, as of this writing**: the cross-room held-out test
+(item 2 below) — everything else about the single-room detector is
+currently GREEN per §20's health check, so the highest-value next action is
+the one genuinely untested axis, not more of the same room.
+
+1. **The cross-room held-out test — still not executed.** Record one real
+   session in a second room (name it clearly by room, e.g.
    `room2_part_1_data`, not just the next `part_N`), then run
-   `evaluate_holdout.py` training on all of room 1's sessions and testing on
-   it — a real number instead of the "6/10" feeling. This is the direct
-   test of the user's stated long-term goal (generalize to any room).
-3. **`validate_session.py`** (proposed multiple times, never built): every
+   `evaluate_holdout.py` training on all 8 of room 1's sessions and testing
+   on it — a real number instead of the "6/10" feeling from the one
+   informal live test done before the order-invariant feature fix (§13).
+   This is the direct test of the user's stated long-term goal (generalize
+   to any room). Repeatedly identified as the top priority across several
+   separate conversations; still hasn't happened.
+2. **Diverse "moving" data / a second person** — all moving data so far is
+   one person (the user) with one general movement style. Untested whether
+   the model detects "a person" specifically vs. "this person." The other
+   genuinely open generalization axis, alongside #1.
+3. **Extended live soak test** — leave the dashboard running for hours,
+   unattended, in normal use, to confirm §15's bug 2 fix (rolling-
+   recalibration drift) holds over a long real session, not just a short
+   test. Lower urgency now that §15's fixes have been running without
+   complaint, but never formally soak-tested.
+4. **`validate_session.py`** (proposed multiple times, never built): every
    new session (§9) has been manually diagnosed by hand — subcarrier
    consistency check, motion-energy/RSSI separability comparison against
-   existing sessions, per-block breakdown. Should be a real script.
-4. **Second ESP32 node** — only actionable once the user has the hardware.
+   existing sessions, per-block breakdown. Should be a real script, still
+   isn't one. `model_evaluation.py` (§20) covers *model* health, not new
+   *session* validation before folding it into training — this is a
+   different, still-missing tool.
+5. **Feature redundancy** — §20's health check flagged 68 highly-correlated
+   feature pairs among the top 25 by importance (expected: neighboring
+   subcarriers move together, and the order-invariant features from §13 are
+   near-duplicates of each other by construction). Not urgent (Random
+   Forest tolerates correlated features fine), but a real candidate for
+   future feature trimming if a leaner model is ever wanted.
+6. **Second ESP32 node** — only actionable once the user has the hardware.
    Would primarily fix the off-axis blind spot (§16), and secondarily enable
    coarse zone-awareness ("which node fired") or a one-node-per-room
    strategy as an alternative to chasing a single universal cross-room
    model.
-5. **Diverse "moving" data** — all moving data so far is one person (the
-   user) with one general movement style. A session with a different pace,
-   or ideally a second person, would test whether the model detects "a
-   person" specifically vs. "this person."
-6. Reposition the ESP32/router to diagonally opposite corners of the current
+7. Reposition the ESP32/router to diagonally opposite corners of the current
    room — free, immediate partial fix for the off-axis blind spot, doesn't
    require new hardware.
 
@@ -657,6 +683,108 @@ ideas**: true position/coordinate tracking (not feasible with current
 single-link hardware — this was explained in detail and the user agreed to
 drop it); zone/room classification via fingerprinting (same reasoning:
 deferred until the 2-class detector is solid).
+
+---
+
+## 19. GitHub repository published
+
+**Why asked:** the user wanted the project on GitHub, "organized well" and
+"well presented."
+
+**Repo**: **https://github.com/IALR/csi-motion-detection** (public).
+
+What was done:
+- **Security first**: found real, hardcoded Wi-Fi credentials
+  (`WIFI_SSID`/`WIFI_PASS`/`ROUTER_IP`) in `main/csi_node.c` in plain text.
+  Moved them into `firmware/main/wifi_secrets.h` (gitignored, real values,
+  never committed) with `firmware/main/wifi_secrets.h.example` (placeholder
+  values, committed) as the template. Verified with `git grep` against the
+  actual committed HEAD tree (not just the working directory) that neither
+  the real password, SSID, nor router IP appear anywhere in git history
+  before pushing.
+- **Reorganized** from a flat folder into: `firmware/` (the ESP-IDF project
+  — `main/`, `CMakeLists.txt`, `sdkconfig` all moved there), `docs/`
+  (`PROJECT_HISTORY.md` moved there), `report/` (already existed). Tool
+  scripts, data folders (`part_1_data`..`part_8_data`), and `csi_model.joblib`
+  were deliberately **kept at the repo root**, not nested further, because
+  every script's default relative paths (`part_1_data`, etc.) assume the
+  working directory is the repo root — moving them would have required
+  updating path logic in every script for no real benefit. Verified nothing
+  broke by re-running `train_model.py` after the move (95.54% LOSO,
+  unchanged).
+- **Copied in** `csi_label_collector.py` and `csi_live_monitor.py` from
+  their original location outside this folder
+  (`C:\Users\ilyas\Documents\Codex\2026-07-21\wh\outputs\`) so the repo is
+  self-contained — a clone of the GitHub repo now has everything needed,
+  nothing lives outside it anymore.
+- **New files created**: `README.md` (architecture diagram in Mermaid,
+  results table, project structure, setup instructions, known limitations),
+  `LICENSE` (MIT), `.gitignore`, `requirements.txt`.
+- **Excluded via `.gitignore`**: `build/` (158MB of regenerable ESP-IDF
+  build output), `csi_dataset_20260723_184612/` (the legacy pre-fix dataset
+  with mixed subcarrier counts, explicitly known-contaminated — see §1),
+  `model_analysis.json` (regenerable), `__pycache__/`.
+- **`gh` CLI wasn't installed initially** — found later at
+  `C:\Program Files\GitHub CLI\gh.exe` but not on the shell session's PATH
+  (a stale-environment issue, not a missing install); worked around by
+  calling the full path directly rather than relying on PATH resolution.
+- Git identity had never been configured on this machine at all (`git
+  config user.name`/`user.email` were unset) — set locally
+  (`--local`, scoped to just this repo, not globally) using the user's
+  known email, since a first commit is impossible without it.
+
+**Result**: 47 files, single initial commit, pushed and tracking
+`origin/master`. Future updates: commit + push as normal, nothing automatic.
+
+---
+
+## 20. Model evaluation report (`model_evaluation.py`)
+
+**Why asked:** the user wanted a dedicated script producing a confusion
+matrix, a feature correlation matrix, overfitting diagnostics, and an
+overall red/amber/green ("RAG") health summary — "a file with all graphs to
+evaluate the model."
+
+Produces `model_evaluation_report.pdf` (6 pages, regenerated fresh every run
+from whatever sessions/window size are passed in — nothing hardcoded from a
+prior run) plus a console log:
+
+1. **Confusion matrix** (out-of-fold LOSO predictions — every prediction
+   came from a fold that never trained on that window's session): counts +
+   row-normalized versions.
+2. **Feature correlation matrix** — top 25 features by importance, Pearson
+   correlation heatmap.
+3. **Feature importance bar chart** (companion to #2).
+4. **Overfitting check #1**: train accuracy vs. held-out accuracy, per
+   session, as a grouped bar chart.
+5. **Overfitting check #2**: a validation curve sweeping `max_depth` from 2
+   to unlimited, plotting mean train accuracy and mean held-out (LOSO)
+   accuracy at each depth.
+6. **RAG health summary**: six checks (overall accuracy, overfit gap,
+   session-to-session variance, worst single session, class balance,
+   feature redundancy), each colored green/amber/red against explicit
+   thresholds defined in the script's `rag()` function.
+
+**Results from the run in this conversation** (8 sessions, 0.75s window):
+out-of-fold accuracy 95.52% (2,252 windows: 44 false alarms, 57 missed
+detections — roughly balanced, not skewed toward one error type); mean
+train-vs-held-out gap 4.5 points (small, healthy); held-out accuracy
+*improves* with tree depth up to ~8 then plateaus around 95.5% rather than
+dropping (the signature of a model that is **not** overfitting — if it
+were, held-out accuracy would fall as depth increased while train accuracy
+kept climbing); worst single session part_7 at 91.7%. Five of six RAG
+checks GREEN; the sixth (feature redundancy, 68 correlated pairs among the
+top 25) is RED but not urgent — see §18 item 5.
+
+**A follow-up question worth remembering the answer to**: the user asked
+whether it's OK that train accuracy hits exactly 100% on every fold. Yes —
+this is structurally expected for an unconstrained Random Forest (each tree
+grows until leaves are pure) and is not evidence of a problem *on its own*;
+what actually matters is the *held-out* accuracy and the *gap* between the
+two, both of which are healthy here. The depth-sweep chart (page 5) is the
+independent evidence for this: if 100% train accuracy were genuinely
+hurting generalization, restricting depth should have improved held-out
+accuracy, and it didn't.
 
 ---
 
