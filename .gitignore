@@ -21,6 +21,10 @@ csi_dataset_20260723_184612/
 # --- Regenerable analysis output ---
 model_analysis.json
 model_evaluation_report.pdf
+report_output/
+
+# --- Local-only model backups (not meant for the shared repo) ---
+csi_model_backup_*.joblib
 
 # --- Editor/OS cruft ---
 .vscode/

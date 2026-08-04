@@ -120,6 +120,7 @@ async def broadcast(clients, msg, last_status=None):
 
 
 async def pump(out_queue, clients, model_bundle, last_status, control):
+    loop = asyncio.get_running_loop()
     clf = model_bundle["model"]
     n_expected = len(model_bundle["amp_columns"])
     frame_hz = model_bundle["frame_hz"]
@@ -207,9 +208,15 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
         raw_prediction, raw_confidence = None, None
         if len(amp_buf) == window_frames:
             feat = make_features(list(amp_buf), list(rssi_buf), baseline)
-            pred = clf.predict(feat)[0]
-            proba = clf.predict_proba(feat)[0]
-            raw_confidence = float(proba[list(clf.classes_).index(pred)])
+            # A single predict_proba() in a thread executor: one forest walk
+            # instead of two (predict() + predict_proba() separately), and
+            # off the event loop entirely so a slow prediction can never
+            # delay WebSocket ping/pong keepalives (that stall is what was
+            # producing "keepalive ping timeout" disconnects under load).
+            proba = (await loop.run_in_executor(None, clf.predict_proba, feat))[0]
+            best_idx = int(np.argmax(proba))
+            pred = clf.classes_[best_idx]
+            raw_confidence = float(proba[best_idx])
             raw_prediction = LABEL_NAMES.get(int(pred), str(pred))
 
             confirmed_label, vote_fraction = smoother.update(int(pred))
@@ -286,7 +293,13 @@ async def main_async(args, model_bundle):
             clients.discard(ws)
             print(f"Client disconnected ({len(clients)} total)")
 
-    async with websockets.serve(handler, "localhost", args.ws_port):
+    # ping_timeout raised from the websockets default (20s) - a backgrounded
+    # or minimized browser tab gets its JS timers throttled by the browser
+    # and can miss a pong well within 20s without the connection actually
+    # being dead; this was closing healthy-but-idle tabs with a scary
+    # "keepalive ping timeout" error.
+    async with websockets.serve(handler, "localhost", args.ws_port,
+                                 ping_interval=20, ping_timeout=60):
         print(f"WebSocket server on ws://localhost:{args.ws_port}")
         print("Open csi_dashboard.html in a browser to view.")
         await pump(out_queue, clients, model_bundle, last_status, control)
