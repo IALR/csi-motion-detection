@@ -20,6 +20,7 @@ csi_dataset_20260723_184612/
 
 # --- Regenerable analysis output ---
 model_analysis.json
+model_evaluation_report.pdf
 
 # --- Editor/OS cruft ---
 .vscode/
