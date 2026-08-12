@@ -532,26 +532,44 @@ is the real test of whether bug 2 in particular is fully resolved (see §18).
 
 ## 16. Current state of the system (as of this writing)
 
-- **Model**: Random Forest, trained on 8 sessions (`part_1_data` through
-  `part_8_data`), 0.75s windows, per-block + rolling calibration, 266
-  features (260 index-specific + 6 order-invariant). **95.54% LOSO
-  accuracy.** Saved to `csi_model.joblib`.
+- **Model**: Random Forest, trained on 10 sessions — the original 8
+  single-room sessions (`part_1_data`..`part_8_data`) plus two second-room
+  sessions (`room2_part_1_data`, `room2_part_2_data`, see §21) — 0.75s
+  windows, per-block + rolling calibration, 266 features (260
+  index-specific + 6 order-invariant). **95.07% LOSO accuracy.** Saved to
+  `csi_model.joblib`. Reproducible via `python train_model.py --sessions
+  part_1_data part_2_data part_3_data part_4_data part_5_data part_6_data
+  part_7_data part_8_data room2_part_1_data room2_part_2_data
+  --window-seconds 0.75` — note the script's CLI defaults are only the
+  first 4 sessions at a 2.0s window (a leftover from early development, see
+  §21), so always pass the full session list and `--window-seconds 0.75`
+  explicitly; running the script bare will silently retrain and overwrite
+  `csi_model.joblib` with a much weaker, wrong-config model.
 - **Validated single-room performance**: strong and repeatedly confirmed via
   LOSO, true held-out-session tests, and cross-algorithm comparison.
-- **Cross-room performance**: genuinely unproven. One informal live test in
-  2 rooms ("6/10") before the order-invariant fix; no rigorous held-out-room
-  test has been run since. This is the single biggest open validation gap.
-- **Live system**: both front ends (Matplotlib + web dashboard) working,
-  recently had two serious bugs fixed (§15), not yet burn-tested over a long
-  unattended period.
-- **Known, understood, NOT-yet-fixed limitation**: an "off-axis blind spot"
-  — movement more than ~1m off the direct line between the ESP32 and the
-  router is detected much more weakly than movement on/near that line. This
-  is physics (Fresnel-zone sensitivity of single-link CSI), not a bug — not
-  fixable by more data or model tuning. Two real fixes exist, neither
-  implemented: (a) reposition the ESP32/router to diagonally opposite
-  corners of the room, free and immediate; (b) a second ESP32 node at a
-  different position, combined via OR logic — requires new hardware.
+- **Cross-room performance**: tested for the first time (§21). A held-out
+  second room scored 82.5% when trained only on room 1; folding two room-2
+  sessions into training brought overall LOSO to 95.07% with room2_part_2
+  as its own held-out fold scoring 98.44%. Real evidence it generalizes
+  across rooms, though still only two rooms total — not yet the "genuinely
+  unproven" state this section used to describe, but not exhaustively
+  proven either.
+- **Live system**: both front ends (Matplotlib + web dashboard) working.
+  The web backend/dashboard were rewritten for **two simultaneous ESP32
+  nodes** (§21) combined via OR logic, plus two further live-only bugs
+  found and fixed since §15 (a WebSocket keepalive-timeout crash from
+  double model inference, and a subcarrier-count-mismatch crash that used
+  to take down the whole server instead of just disabling that one node's
+  predictions). Confirmed working live with both nodes physically separated
+  — not yet burn-tested over a long unattended period (§18 item 3).
+- **Off-axis blind spot**: previously an open, unfixed limitation (physics
+  of single-link CSI, not a bug — see prior wording below). **Now
+  mitigated**: a second ESP32 node was added, physically separated from the
+  first and combined via OR logic (§21), and the user has confirmed live
+  that this measurably improves room coverage. Not a complete fix (each
+  node still individually has its own blind spot, and the two nodes'
+  results aren't cross-checked against each other beyond OR-combination),
+  but the single biggest practical gap here is closed.
 
 ---
 
@@ -566,6 +584,7 @@ is the real test of whether bug 2 in particular is fully resolved (see §18).
 | `analyze_model.py` | Produces the numbers behind a trained model as JSON (fold accuracy, feature importance, class balance, motion-energy distributions) — built for an early Artifact visualization, now somewhat superseded by later analysis but still functional |
 | `compare_models.py` | Compares 6 ML model families (RF, GB, LR, SVM×2, KNN) under identical LOSO methodology |
 | `model_evaluation.py` | Produces `model_evaluation_report.pdf` — confusion matrix, feature correlation matrix, two overfitting diagnostics, RAG health summary (§20) |
+| `full_model_report.py` | Generic (not CSI-specific) LOSO evaluation report generator — 16 metrics, ~20 figures, paginated PDF with a real TOC via reportlab. Accepts `--csv` or `--sessions` so it can evaluate any tabular classification model, not just this project's (§21) |
 | `csi_label_collector.py` | Auto-cycling data collector (leave/empty/moving protocol) — copied into the repo root as part of §19's GitHub prep, originally lived outside this folder |
 | `csi_live_monitor.py` | Pre-model live waterfall + motion-energy verification tool — same origin note as above |
 | `csi_live_predict.py` | Matplotlib-based live inference: waterfall + real-time prediction, with the same calibration/smoothing/rolling-recal logic as the web version. Press 'r' to force recalibration. |
@@ -599,6 +618,8 @@ recorded at 10Hz. `session_id` below is the value in that folder's
 | `part_6_data/` | `20260727_142713_ba7d42` | Continuous/slow drift within the session, cause unconfirmed (possibly thermal) — motion energy stayed correctly flat throughout, only the static per-subcarrier fingerprint drifted | 72.65% before §8's fix → 91.45% after (best achievable — drift is continuous, not a single step, so per-block recalibration can't fully track it) | in training |
 | `part_7_data/` | `20260729_140007_dba60b` | Normal recording; the "86% vs 95%" case that turned out to be a window-size artifact (§10), not bad data — less vigorous movement made it more sensitive to the shorter 0.75s window than average | 95% at 2.0s window / 86% at 0.75s window | in training |
 | `part_8_data/` | `20260729_152303_3a4d7f` | Deliberately "opened the window." Clean, one-directional errors only. Revealed the aggregate motion-energy feature can go flat while per-subcarrier features still separate the classes — directly motivated §13's order-invariant features | 95.33% | in training |
+| `room2_part_1_data/` | — | First session recorded in a genuinely different room (§21) — the cross-room held-out test | 82.5% (trained on all 8 room-1 sessions only) | in training |
+| `room2_part_2_data/` | — | Second room-2 session, recorded to fold room-2 data into training rather than leave it as a single held-out sample (§21) | 98.44% (as its own held-out fold, 10-session LOSO) | in training |
 
 **Sessions that were recorded but discarded — confirmed NOT present on disk
 anymore** (each re-recording used the same folder name, so the collector
@@ -633,29 +654,27 @@ current, authoritative layout.
 
 ## 18. Open items / recommended next steps
 
-**Current #1 priority, as of this writing**: the cross-room held-out test
-(item 2 below) — everything else about the single-room detector is
-currently GREEN per §20's health check, so the highest-value next action is
-the one genuinely untested axis, not more of the same room.
+**Current #1 priority, as of this writing**: diverse "moving" data / a
+second person (item 1 below) — the cross-room test and the second node are
+both done now (§21), so the highest-value remaining untested axis is
+whether the model generalizes beyond the one person it's ever been trained
+on.
 
-1. **The cross-room held-out test — still not executed.** Record one real
-   session in a second room (name it clearly by room, e.g.
-   `room2_part_1_data`, not just the next `part_N`), then run
-   `evaluate_holdout.py` training on all 8 of room 1's sessions and testing
-   on it — a real number instead of the "6/10" feeling from the one
-   informal live test done before the order-invariant feature fix (§13).
-   This is the direct test of the user's stated long-term goal (generalize
-   to any room). Repeatedly identified as the top priority across several
-   separate conversations; still hasn't happened.
-2. **Diverse "moving" data / a second person** — all moving data so far is
+1. **Diverse "moving" data / a second person** — all moving data so far is
    one person (the user) with one general movement style. Untested whether
-   the model detects "a person" specifically vs. "this person." The other
-   genuinely open generalization axis, alongside #1.
+   the model detects "a person" specifically vs. "this person." Now that
+   room coverage (cross-room + 2-node, §21) is validated, this is the
+   single biggest remaining generalization gap.
+2. **A genuine third room** — cross-room has been tested in exactly 2 rooms
+   (§21). Two rooms shows "it transfers, roughly"; a third would show
+   whether the generalization gain is a real trend or a fluke (this was the
+   user's own reasoning on 2026-08-04, see memory).
 3. **Extended live soak test** — leave the dashboard running for hours,
    unattended, in normal use, to confirm §15's bug 2 fix (rolling-
    recalibration drift) holds over a long real session, not just a short
    test. Lower urgency now that §15's fixes have been running without
-   complaint, but never formally soak-tested.
+   complaint, but never formally soak-tested. Now doubly relevant with two
+   nodes running concurrently (§21) rather than one.
 4. **`validate_session.py`** (proposed multiple times, never built): every
    new session (§9) has been manually diagnosed by hand — subcarrier
    consistency check, motion-energy/RSSI separability comparison against
@@ -669,14 +688,11 @@ the one genuinely untested axis, not more of the same room.
    near-duplicates of each other by construction). Not urgent (Random
    Forest tolerates correlated features fine), but a real candidate for
    future feature trimming if a leaner model is ever wanted.
-6. **Second ESP32 node** — only actionable once the user has the hardware.
-   Would primarily fix the off-axis blind spot (§16), and secondarily enable
-   coarse zone-awareness ("which node fired") or a one-node-per-room
-   strategy as an alternative to chasing a single universal cross-room
-   model.
-7. Reposition the ESP32/router to diagonally opposite corners of the current
-   room — free, immediate partial fix for the off-axis blind spot, doesn't
-   require new hardware.
+6. ~~Second ESP32 node~~ — **done**, see §21. Two nodes, physically
+   separated, combined via OR logic; user has confirmed live that this
+   measurably improves room coverage over a single node.
+7. ~~The cross-room held-out test~~ — **done**, see §21. Still only 2 rooms
+   total (item 2 above carries the "is this really a trend" follow-up).
 
 **Explicitly deferred, by the user's own choice, not because they're bad
 ideas**: true position/coordinate tracking (not feasible with current
@@ -785,6 +801,114 @@ two, both of which are healthy here. The depth-sweep chart (page 5) is the
 independent evidence for this: if 100% train accuracy were genuinely
 hurting generalization, restricting depth should have improved held-out
 accuracy, and it didn't.
+
+---
+
+## 21. Cross-room retrain, dual-node hardware, and live-server hardening
+
+**Why asked:** §18's #1 priority (cross-room test) plus the user acquiring
+a second ESP32-S3 board, leading naturally into "how do I use 2 nodes
+properly."
+
+**Cross-room test.** Recorded `room2_part_1_data` in a genuinely different
+room (same router link, 128 subcarriers, clean protocol). Trained on all 8
+room-1 sessions, scored once on it via `evaluate_holdout.py`: **82.5%**
+(vs. 95.5% same-room LOSO at the time). Errors were lopsided — 26%
+false-alarm rate on true-empty windows, only 9% miss rate on true-moving —
+the model leaned toward over-alerting in the new room. Diagnosed the same
+way as every prior anomaly in this project (§9's pattern): room2's
+`rssi_std_ratio` empty/moving separation (0.37 vs 1.65) was real but much
+weaker than typical room-1 sessions (e.g. part_1: 0.24 vs 3.7), so
+borderline windows tipped toward "moving" more easily. Rather than
+immediately fold this one session into training, the user chose to record
+a second room-2 session first (`room2_part_2_data`), reasoning that two
+single-room-2 data points can't distinguish "generalizes" from "got
+lucky/unlucky once."
+
+**10-session retrain.** Trained on all 8 room-1 sessions plus both room-2
+sessions, 0.75s window: **95.07% LOSO accuracy**, with `room2_part_2_data`
+scoring 98.44% as its own held-out fold — a real, repeatable (confirmed on
+a second run, same `random_state=42`) result, not the informal "6/10" this
+project's docs used to cite. Full historical accuracy timeline: 96.96% →
+97.30%/95.83% → 98.34% → 95.87% → 95.54% → cross-room 82.5% → 10-session
+retrain 95.07%. **Gotcha discovered while re-verifying this for the docs**:
+`train_model.py`'s CLI defaults are only `part_1_data`..`part_4_data` at a
+2.0s window (leftover from early development, §2) — running the script
+with no arguments silently retrains and overwrites `csi_model.joblib` with
+a much weaker, wrong-config model. Always pass the full 10-session list and
+`--window-seconds 0.75` explicitly (see the exact command in §16).
+
+**`full_model_report.py`** was built alongside this: a generic (not
+CSI-specific) reportlab-based LOSO evaluation report generator — 16
+metrics including ROC AUC/MCC/Cohen kappa, ~20 figures, a real paginated
+TOC via `BaseDocTemplate`. Verified end-to-end against this project's own
+data (94.2% out-of-fold, matching `model_evaluation.py`'s independent
+number).
+
+**Dual-node architecture.** With a second ESP32-S3 available, built a real
+2-node system rather than just wiring up a second serial port:
+- Each node runs its **own independent pipeline** end-to-end — own serial
+  connection, own calibration baseline, own rolling window, own model
+  inference. No timestamp synchronization or shared feature vector between
+  nodes; the only combination point is the very last step.
+- **Combination logic** (`compute_combined()` in `csi_live_server.py`): OR
+  across nodes — MOVING if *any* node says MOVING, EMPTY only if *all*
+  configured nodes say EMPTY. Chosen because the two nodes' value is
+  covering *different* physical geometry (different blind spots), not
+  cross-checking each other — requiring agreement would only reintroduce
+  the single-node blind spot problem this was built to fix. Unit-tested
+  with 9 explicit cases before deployment.
+- `csi_live_server.py` gained a `--port-b` CLI arg, per-node message
+  tagging (`"node": "A"|"B"` on every broadcast), a `combined` message type
+  for the OR-ed overall state, and a per-node control channel (client can
+  request `{"type":"recalibrate","node":"A"|"B"|"all"}`).
+- `csi_dashboard.html` gained a "Nodes" card (per-node tiles: status,
+  RSSI, energy, a "View"/"Viewing" switch), a node-switch control on the
+  Signal (waterfall/energy) card, per-node calibration sub-sections, and a
+  `describeCombined()` helper that annotates the hero prediction badge with
+  *which* node(s) triggered it (e.g. "confirmed by node B").
+
+**Two live-server bugs found and fixed in the same pass:**
+1. **Keepalive-timeout crash / reported prediction lag** — root cause was
+   calling `.predict()` and `.predict_proba()` separately (two full forest
+   walks) directly on the asyncio event loop, blocking WebSocket ping/pong
+   handling long enough to trip the default 20s `ping_timeout`. Fixed by
+   collapsing to a single `predict_proba()` call run via
+   `loop.run_in_executor()` (off the event loop entirely) plus raising
+   `ping_timeout` to 60s as a safety margin.
+2. **Subcarrier-mismatch crash** — a stale AP config (see below) caused one
+   node's stream to have 192 subcarriers instead of the model's expected
+   128. The existing mismatch check only *warned once* but never actually
+   prevented the doomed `predict_proba()` call on malformed data, which
+   raised inside `asyncio.gather()` and crashed the **entire** server —
+   taking down both nodes over one node's problem. Fixed by recomputing the
+   mismatch check fresh every loop iteration and gating the whole
+   prediction block on it, so a mismatched node degrades gracefully (raw
+   data keeps streaming, predictions disabled, persistent warning shown)
+   instead of killing the shared process.
+
+**Two intervening hardware/network issues hit during bring-up, both
+config-level, not logic bugs:**
+- Node A produced zero `CSI_AMP` output after a rebuild. Root cause:
+  `firmware/main/wifi_secrets.h`'s `ROUTER_IP` was stale (pointed at an
+  old gateway on a different subnet than the boot log's actual `gw:`).
+  Since CSI is triggered by pinging `ROUTER_IP` at 100ms intervals, every
+  ping silently failed and no CSI-triggering traffic was ever generated.
+  Fixed by updating `ROUTER_IP` to match the real gateway.
+- The `ValueError: X has 394 features, but ... expecting 266` crash above
+  — root cause was the AP (a phone hotspot in this case) auto-negotiating a
+  40MHz channel width instead of 20MHz, doubling subcarriers 128→192, an
+  exact repeat of the failure mode documented in §9. No router admin panel
+  is available to force 20MHz on a phone hotspot, so the durable fix is an
+  actual router; the software-side crash (see bug 2 above) is fixed
+  regardless of which AP is used.
+
+**Result, confirmed live by the user**: both nodes running simultaneously,
+physically separated (not co-located — co-located nodes see nearly
+identical multipath geometry and won't demonstrate the coverage benefit),
+dashboard showing both node tiles live and correctly combining via OR. The
+user confirmed this measurably improves room coverage over the single-node
+setup — the off-axis blind spot (§16) is no longer a fully open problem.
 
 ---
 

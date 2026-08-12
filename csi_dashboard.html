@@ -104,7 +104,7 @@
     transition: background-color 0.4s ease;
   }
   /* Faint state-driven wash instead of a decorative gradient - only appears
-     while the confirmed prediction is MOVING, so color on this page always
+     while the COMBINED prediction is MOVING, so color on this page always
      means something rather than being permanent decoration. */
   body.state-moving {
     background-image:
@@ -116,6 +116,7 @@
   .icon { width: 16px; height: 16px; flex: none; }
   .icon-lg { width: 20px; height: 20px; flex: none; }
   .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .node-b-hidden { display: none !important; }
 
   /* ---------------- Top bar ---------------- */
   .topbar {
@@ -250,8 +251,9 @@
     50%      { box-shadow: inset 0 0 0 40px rgba(208,59,59,0.05); }
   }
 
-  /* Waveform behind the label, redrawn each frame from real motion-energy
-     history (not decorative) - low-opacity so it reads as texture, not UI. */
+  /* Waveform behind the label, redrawn each frame from the SELECTED node's
+     real motion-energy history (not decorative) - low-opacity so it reads
+     as texture, not UI. */
   .badge-wave {
     position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 34px;
     color: currentColor; opacity: 0.45; pointer-events: none;
@@ -281,6 +283,24 @@
   }
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
+  /* ---------------- Nodes card ---------------- */
+  .node-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .node-tile { background: var(--surface-2); border-radius: 10px; padding: 12px 14px; border: 1px solid transparent; }
+  .node-tile.is-selected { border-color: var(--series-1); }
+  .node-tile-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .node-tile-head .node-name { font-weight: 700; font-size: 13px; flex: 1; }
+  .node-view-btn {
+    font-size: 10.5px; font-weight: 600; color: var(--text-secondary);
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px;
+    padding: 3px 8px; cursor: pointer;
+  }
+  .node-view-btn.active { color: #fff; background: var(--series-1); border-color: var(--series-1); }
+  .node-status { font-size: 13px; font-weight: 650; margin-bottom: 8px; }
+  .node-status.moving { color: var(--critical); }
+  .node-status.empty { color: var(--good); }
+  .node-meta { font-size: 12px; }
+  .node-meta dd { font-family: var(--font-mono); }
+
   /* ---------------- Session summary ---------------- */
   .session-meta { max-width: 460px; }
   .session-meta dd { font-family: var(--font-mono); font-size: 15px; }
@@ -289,6 +309,7 @@
   .occ-fill { background: var(--critical); height: 100%; transition: width 0.4s ease; border-radius: 3px; }
 
   /* ---------------- Calibration ---------------- */
+  .calib-node-head { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; margin-bottom: 8px; }
   .stat-row { display: flex; gap: 10px; flex-wrap: wrap; }
   .stat-tile { flex: 1 1 120px; background: var(--surface-2); border-radius: 10px; padding: 10px 12px; }
   .stat-tile .label { font-size: 10.5px; color: var(--text-secondary); margin-bottom: 5px; }
@@ -303,11 +324,19 @@
     display: inline-flex; align-items: center; gap: 7px;
     background: var(--surface-2); border: 1px solid var(--border); color: var(--text-primary);
     font-size: 12.5px; font-weight: 600; padding: 8px 14px; border-radius: 9px; cursor: pointer;
-    margin-top: 14px; transition: background 0.15s, border-color 0.15s;
+    margin-top: 10px; transition: background 0.15s, border-color 0.15s;
   }
   .btn-secondary:hover { background: var(--surface-3); border-color: var(--text-secondary); }
 
   /* ---------------- Signal card (waterfall + energy, unified) ---------------- */
+  .node-switch { display: flex; gap: 6px; margin-left: auto; }
+  .node-switch-btn {
+    font-size: 11.5px; font-weight: 600; color: var(--text-secondary);
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 7px;
+    padding: 5px 10px; cursor: pointer;
+  }
+  .node-switch-btn.active { color: #fff; background: var(--series-1); border-color: var(--series-1); }
+
   .panel-label {
     display: flex; align-items: center; gap: 7px;
     font-size: 11px; font-weight: 700; color: var(--text-secondary);
@@ -356,6 +385,8 @@
     .status-badge { min-height: 110px; }
     .card { padding: 16px 16px 18px; }
     .badge-label { font-size: 30px !important; }
+    .card-head { flex-wrap: wrap; }
+    .node-switch { margin-left: 0; }
   }
 </style>
 </head>
@@ -380,7 +411,7 @@
           <span class="pill-dot" id="conn-dot"></span>
           <span id="conn-text">Connecting…</span>
         </div>
-        <div class="pill" id="pill-esp" title="ESP32 CSI stream">
+        <div class="pill" id="pill-esp" title="ESP32 CSI stream (selected node)">
           <span class="pill-dot" id="esp-dot"></span>
           <span id="esp-status-text">No signal</span>
         </div>
@@ -388,7 +419,7 @@
           <span class="pill-dot" id="model-dot"></span>
           <span id="model-status-text">Loading</span>
         </div>
-        <div class="pill" id="pill-calib" title="Calibration state">
+        <div class="pill" id="pill-calib" title="Calibration state (all nodes)">
           <span class="pill-dot" id="calib-dot"></span>
           <span id="calib-status-text">–</span>
         </div>
@@ -431,7 +462,7 @@
         </div>
         <div class="pred-meta">
           <dl class="meta-grid">
-            <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a11 11 0 0 1 16 0"/><path d="M7.5 13.5a6.5 6.5 0 0 1 9 0"/><circle cx="12" cy="18" r="0.7" fill="currentColor" stroke="none"/></svg>RSSI</dt><dd class="mono skeleton" id="meta-rssi">–</dd>
+            <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a11 11 0 0 1 16 0"/><path d="M7.5 13.5a6.5 6.5 0 0 1 9 0"/><circle cx="12" cy="18" r="0.7" fill="currentColor" stroke="none"/></svg>RSSI (viewed node)</dt><dd class="mono skeleton" id="meta-rssi">–</dd>
             <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>Motion energy</dt><dd class="mono skeleton" id="meta-energy">–</dd>
             <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>Buffer</dt><dd class="mono skeleton" id="meta-buffer">–</dd>
           </dl>
@@ -441,10 +472,48 @@
       </div>
     </section>
 
+    <section class="card span-full" id="nodes-card">
+      <div class="card-head">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.2"/><circle cx="19" cy="6" r="2.2"/><circle cx="19" cy="18" r="2.2"/><path d="M7 12h6M12 12l5-4.5M12 12l5 4.5"/></svg>
+        <h2>Nodes</h2>
+      </div>
+      <p class="desc">Each node calibrates and predicts completely independently. The prediction above is OR'd across all nodes shown here — either one confirming MOVING is enough, which is what lets a second node catch movement the first one's off-axis blind spot would otherwise miss.</p>
+      <div class="node-grid">
+        <div class="node-tile is-selected" id="tile-A" data-node="A">
+          <div class="node-tile-head">
+            <span class="pill-dot" id="node-dot-A"></span>
+            <span class="node-name">Node A</span>
+            <button class="node-view-btn active" data-node="A">Viewing</button>
+          </div>
+          <div class="node-status" id="node-status-A">warming up…</div>
+          <dl class="meta-grid node-meta">
+            <dt>RSSI</dt><dd class="mono" id="node-rssi-A">–</dd>
+            <dt>Energy</dt><dd class="mono" id="node-energy-A">–</dd>
+          </dl>
+        </div>
+        <div class="node-tile node-b-hidden" id="tile-B" data-node="B">
+          <div class="node-tile-head">
+            <span class="pill-dot" id="node-dot-B"></span>
+            <span class="node-name">Node B</span>
+            <button class="node-view-btn" data-node="B">View</button>
+          </div>
+          <div class="node-status" id="node-status-B">warming up…</div>
+          <dl class="meta-grid node-meta">
+            <dt>RSSI</dt><dd class="mono" id="node-rssi-B">–</dd>
+            <dt>Energy</dt><dd class="mono" id="node-energy-B">–</dd>
+          </dl>
+        </div>
+      </div>
+    </section>
+
     <section class="card span-full">
       <div class="card-head">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         <h2>Signal</h2>
+        <div class="node-switch" id="signal-node-switch">
+          <button class="node-switch-btn active" data-node="A">Node A</button>
+          <button class="node-switch-btn node-b-hidden" data-node="B">Node B</button>
+        </div>
       </div>
 
       <div class="signal-panel">
@@ -452,7 +521,7 @@
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
           Waterfall
         </div>
-        <p class="desc">Amplitude per subcarrier over time, newest row at the bottom.</p>
+        <p class="desc">Amplitude per subcarrier over time, newest row at the bottom, for the node selected above.</p>
         <div class="wf-holder">
           <canvas id="waterfall"></canvas>
         </div>
@@ -471,7 +540,7 @@
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>
           Motion energy
         </div>
-        <p class="desc">Mean frame-to-frame amplitude change — the signal the model is watching. Empty sits low and flat; moving spikes. Hover to inspect a point.</p>
+        <p class="desc">Mean frame-to-frame amplitude change for the selected node. Empty sits low and flat; moving spikes. Hover to inspect a point.</p>
         <div class="chart-holder">
           <svg id="energy" width="100%" height="140"></svg>
           <div class="chart-tooltip" id="energy-tooltip"></div>
@@ -485,6 +554,7 @@
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
         <h2>Session summary</h2>
       </div>
+      <p class="desc" style="margin-bottom:10px;">Tracks the combined (OR'd) prediction, not any single node.</p>
       <dl class="meta-grid session-meta">
         <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>Uptime</dt><dd class="skeleton" id="stat-uptime">–</dd>
         <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12 12 5l-8 7"/><path d="M6 10v9h12v-9"/></svg>Time empty</dt><dd class="skeleton" id="stat-empty-time">–</dd>
@@ -500,21 +570,34 @@
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/></svg>
         <h2>Calibration</h2>
       </div>
-      <div class="stat-row">
-        <div class="stat-tile">
-          <div class="label">Last recalibrated</div>
-          <div class="value skeleton" id="recal-last">–</div>
+
+      <div class="calib-node" data-node="A">
+        <div class="calib-node-head"><span class="pill-dot" id="calib-node-dot-A"></span>Node A</div>
+        <div class="stat-row">
+          <div class="stat-tile"><div class="label">Last recalibrated</div><div class="value skeleton" id="recal-last-A">–</div></div>
+          <div class="stat-tile"><div class="label">Count</div><div class="value" id="recal-count-A">0</div></div>
         </div>
-        <div class="stat-tile">
-          <div class="label">Recalibration count</div>
-          <div class="value" id="recal-count">0</div>
-        </div>
+        <button class="btn-secondary" data-recal-node="A">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+          Force recalibration — Node A
+        </button>
       </div>
+
+      <div class="signal-divider node-b-hidden" id="calib-divider-B"></div>
+
+      <div class="calib-node node-b-hidden" data-node="B" id="calib-node-B">
+        <div class="calib-node-head"><span class="pill-dot" id="calib-node-dot-B"></span>Node B</div>
+        <div class="stat-row">
+          <div class="stat-tile"><div class="label">Last recalibrated</div><div class="value skeleton" id="recal-last-B">–</div></div>
+          <div class="stat-tile"><div class="label">Count</div><div class="value" id="recal-count-B">0</div></div>
+        </div>
+        <button class="btn-secondary" data-recal-node="B">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+          Force recalibration — Node B
+        </button>
+      </div>
+
       <ul class="recal-log" id="recal-log"></ul>
-      <button class="btn-secondary" id="force-recal-btn">
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
-        Force recalibration now
-      </button>
     </section>
 
   </main>
@@ -557,12 +640,49 @@ const RING_R = 30;
 const RING_CIRC = 2 * Math.PI * RING_R;
 
 let ws = null;
-let nActive = null;
-let waterfallData = null; // Float32Array, row-major, HISTORY_ROWS x nActive
-let clim = null; // [lo, hi]
-const calibSamples = [];
-const energyHistory = [];
 
+// ---------------- Per-node state ----------------
+// One node ("A") always exists; "B" is created lazily the first time a
+// message tagged node="B" arrives, and its UI (tile, signal-switch button,
+// calibration row) is revealed at that point - so running the server in
+// single-node mode looks exactly like the old single-node dashboard, and
+// nothing here needs two hard-coded copies of every variable.
+function makeNode(id) {
+  return {
+    id,
+    nActive: null,
+    waterfallData: null, // Float32Array, row-major, HISTORY_ROWS x nActive
+    clim: null,           // [lo, hi]
+    calibSamples: [],
+    energyHistory: [],
+    lastFrameAt: null,
+    rssi: null, energy: null,
+    confirmed: null,       // 'EMPTY' | 'MOVING' | null, mirrors the latest combined.nodes[id]
+    confidence: null,      // this node's own vote fraction behind its confirmed state
+    calibText: null,       // e.g. 'Calibrating 6s' while mid-calibration, else null
+    lastRecalibratedAt: null,
+    recalCount: 0,
+    discovered: false,
+  };
+}
+const nodes = { A: makeNode('A') };
+let selectedNode = 'A';
+
+function getNode(id) {
+  if (!nodes[id]) nodes[id] = makeNode(id);
+  const node = nodes[id];
+  if (!node.discovered) {
+    node.discovered = true;
+    if (id !== 'A') revealNodeB();
+  }
+  return node;
+}
+
+function revealNodeB() {
+  document.querySelectorAll('.node-b-hidden').forEach(el => el.classList.remove('node-b-hidden'));
+}
+
+// ---------------- DOM refs ----------------
 const dot = document.getElementById('conn-dot');
 const connText = document.getElementById('conn-text');
 const espDot = document.getElementById('esp-dot');
@@ -592,18 +712,14 @@ const metaRaw = document.getElementById('meta-raw');
 const predUpdated = document.getElementById('pred-updated');
 const canvas = document.getElementById('waterfall');
 const ctx = canvas.getContext('2d');
-const recalLastEl = document.getElementById('recal-last');
-const recalCountEl = document.getElementById('recal-count');
 const recalLogEl = document.getElementById('recal-log');
-let lastRecalibratedAt = null;
-let recalCount = 0;
 let metaStarted = false; // first real RSSI/energy/buffer frame clears the skeleton placeholders
 
-function clearSkeleton(...els) { els.forEach(el => el.classList.remove('skeleton')); }
+function clearSkeleton(...els) { els.forEach(el => el && el.classList.remove('skeleton')); }
 
-// Sets the hero badge's icon/text/confidence ring, the card's state-tinted
-// edge, and the calibration pill together, so every call site (calibrating/
-// calibrated/frame handlers) stays a single line instead of repeating the
+// Sets the hero badge's icon/text/confidence ring and the card's
+// state-tinted edge together, so every call site (calibrating/calibrated/
+// combined handlers) stays a single line instead of repeating the
 // className/innerHTML wiring at each branch.
 function setBadge(stateClass, iconKey, label, sub, confidence) {
   statusBadge.className = 'status-badge ' + stateClass;
@@ -637,17 +753,21 @@ tickClock();
 setInterval(tickClock, 1000);
 
 setInterval(() => {
-  if (lastRecalibratedAt === null) return;
-  const secs = (Date.now() - lastRecalibratedAt) / 1000;
-  const mins = Math.floor(secs / 60);
-  recalLastEl.textContent = mins > 0 ? `${mins}m ${Math.floor(secs % 60)}s ago` : `${secs.toFixed(0)}s ago`;
+  Object.values(nodes).forEach(node => {
+    if (node.lastRecalibratedAt === null) return;
+    const el = document.getElementById(`recal-last-${node.id}`);
+    if (!el) return;
+    const secs = (Date.now() - node.lastRecalibratedAt) / 1000;
+    const mins = Math.floor(secs / 60);
+    el.textContent = mins > 0 ? `${mins}m ${Math.floor(secs % 60)}s ago` : `${secs.toFixed(0)}s ago`;
+  });
 }, 1000);
 
 // ---------------- Session summary ----------------
-// Tracked entirely client-side from the confirmed (smoothed) prediction
-// stream: sessionStartAt is set once calibration finishes; emptyMs/movingMs
-// accumulate whenever the CONFIRMED state holds that value, and are only
-// finalized into the running total when the state actually changes (the
+// Tracked entirely client-side from the COMBINED (OR'd) prediction stream,
+// not any single node - sessionStartAt is set once the combined result is
+// first known; emptyMs/movingMs accumulate whenever the combined state
+// holds that value, finalized into the running total when it changes (the
 // current partial segment is added live in the ticking display instead).
 const statUptime = document.getElementById('stat-uptime');
 const statEmptyTime = document.getElementById('stat-empty-time');
@@ -715,20 +835,16 @@ setInterval(() => {
   occFill.style.width = `${pct.toFixed(1)}%`;
 }, 1000);
 
-// Ticks even if frames stop arriving - so "is it actually frozen, or just
-// quiet" is answered on screen instead of by guessing. lastFrameAt is set
-// in onFrame() further down; referencing it here is safe because this
-// interval callback only runs after the whole script (including that
-// declaration) has executed at least once. Also drives the ESP32 status
-// pill in the header from the same signal - streaming/idle/no-signal are
-// just named thresholds on "how long since the last frame arrived," not a
-// separate telemetry channel the firmware doesn't actually send.
+// Ticks even if frames stop arriving, for whichever node is currently
+// selected - so "is it actually frozen, or just quiet" is answered on
+// screen instead of by guessing.
 setInterval(() => {
-  if (lastFrameAt === null) {
+  const node = nodes[selectedNode];
+  if (!node || node.lastFrameAt === null) {
     setPill(espDot, espStatusText, 'warn', 'Waiting for data');
     return;
   }
-  const secs = (Date.now() - lastFrameAt) / 1000;
+  const secs = (Date.now() - node.lastFrameAt) / 1000;
   if (secs <= 3) setPill(espDot, espStatusText, 'good', 'Streaming');
   else if (secs <= 8) setPill(espDot, espStatusText, 'warn', `Idle ${secs.toFixed(0)}s`);
   else setPill(espDot, espStatusText, 'bad', `No signal ${secs.toFixed(0)}s`);
@@ -754,58 +870,102 @@ function connect() {
 }
 connect();
 
-const forceRecalBtn = document.getElementById('force-recal-btn');
-forceRecalBtn.addEventListener('click', () => {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'recalibrate' }));
-    forceRecalBtn.lastChild.textContent = ' Requested — leave the room…';
-    setTimeout(() => { forceRecalBtn.lastChild.textContent = ' Force recalibration now'; }, 3000);
+// ---------------- Node selection (Nodes card tiles + Signal card switch) ----------------
+function selectNode(id) {
+  if (!nodes[id]) return;
+  selectedNode = id;
+  document.querySelectorAll('.node-view-btn').forEach(btn => {
+    const active = btn.dataset.node === id;
+    btn.classList.toggle('active', active);
+    btn.textContent = active ? 'Viewing' : 'View';
+  });
+  document.querySelectorAll('.node-switch-btn').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.node === id));
+  document.querySelectorAll('.node-tile').forEach(tile =>
+    tile.classList.toggle('is-selected', tile.dataset.node === id));
+
+  // Redraw immediately from the newly-selected node's own stored buffers,
+  // rather than waiting for its next frame to arrive.
+  const node = nodes[id];
+  metaStarted = false;
+  if (node.nActive !== null) {
+    sizeCanvasFor(node);
+    drawWaterfallFor(node);
+  } else {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
+  drawEnergyFor(node);
+}
+document.querySelectorAll('.node-view-btn, .node-switch-btn').forEach(btn => {
+  btn.addEventListener('click', () => selectNode(btn.dataset.node));
 });
 
+// ---------------- Force-recalibrate buttons (per node) ----------------
+document.querySelectorAll('[data-recal-node]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const nodeId = btn.dataset.recalNode;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'recalibrate', node: nodeId }));
+      const original = btn.lastChild.textContent;
+      btn.lastChild.textContent = ` Requested — leave the room (node ${nodeId})…`;
+      setTimeout(() => { btn.lastChild.textContent = original; }, 3000);
+    }
+  });
+});
+
+// ---------------- Message routing ----------------
 function handleMessage(msg) {
-  if (msg.type === 'error') {
-    showBanner(msg.message);
-    return;
-  }
-  if (msg.type === 'warning') {
-    showBanner(msg.message);
+  if (msg.type === 'error' || msg.type === 'warning') {
+    showBanner(msg.node ? `[node ${msg.node}] ${msg.message}` : msg.message);
     return;
   }
   if (msg.type === 'init') {
-    nActive = msg.n_active;
-    waterfallData = new Float32Array(HISTORY_ROWS * nActive).fill(0);
-    sizeCanvas();
+    const node = getNode(msg.node || 'A');
+    node.nActive = msg.n_active;
+    node.waterfallData = new Float32Array(HISTORY_ROWS * node.nActive).fill(0);
+    if (node.id === selectedNode) sizeCanvasFor(node);
     setPill(modelDot, modelStatusText, 'good', 'Ready');
     return;
   }
   if (msg.type === 'calibrating') {
-    setBadge('calibrating', 'calib', 'Calibrating…', `leave the room — ${Math.ceil(msg.remaining_seconds)}s left`);
-    metaBuffer.textContent = `${msg.buffered}/${msg.calib_frames} (calibration)`;
-    setPill(calibDot, calibStatusText, 'warn', `Calibrating ${Math.ceil(msg.remaining_seconds)}s`);
+    const node = getNode(msg.node || 'A');
+    node.calibText = `Calibrating ${Math.ceil(msg.remaining_seconds)}s`;
+    updateNodeTile(node);
+    updateTopCalibPill();
+    if (node.id === selectedNode) {
+      metaBuffer.textContent = `${msg.buffered}/${msg.calib_frames} (calibration)`;
+    }
     return;
   }
   if (msg.type === 'calibrated') {
-    setBadge('warming', 'warm', 'Calibrated', 'warming up…');
-    lastRecalibratedAt = msg.at_unix_ms || Date.now(); // initial calibration counts as the first one
-    clearSkeleton(recalLastEl);
-    setPill(calibDot, calibStatusText, 'good', 'Ready');
+    const node = getNode(msg.node || 'A');
+    node.calibText = null;
+    node.lastRecalibratedAt = msg.at_unix_ms || Date.now(); // initial calibration counts as the first one
+    clearSkeleton(document.getElementById(`recal-last-${node.id}`));
+    updateNodeTile(node);
+    updateTopCalibPill();
     return;
   }
   if (msg.type === 'recalibrated') {
-    lastRecalibratedAt = msg.at_unix_ms;
-    recalCount += 1;
-    recalCountEl.textContent = recalCount;
+    const node = getNode(msg.node || 'A');
+    node.lastRecalibratedAt = msg.at_unix_ms;
+    node.recalCount += 1;
+    const countEl = document.getElementById(`recal-count-${node.id}`);
+    if (countEl) countEl.textContent = node.recalCount;
     const li = document.createElement('li');
     li.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>' +
-      new Date(msg.at_unix_ms).toLocaleTimeString();
+      `node ${node.id} · ` + new Date(msg.at_unix_ms).toLocaleTimeString();
     recalLogEl.prepend(li);
     while (recalLogEl.children.length > 10) recalLogEl.removeChild(recalLogEl.lastChild);
-    setPill(calibDot, calibStatusText, 'good', 'Recalibrated');
     return;
   }
   if (msg.type === 'frame') {
     onFrame(msg);
+    return;
+  }
+  if (msg.type === 'combined') {
+    onCombined(msg);
+    return;
   }
 }
 
@@ -814,78 +974,154 @@ function showBanner(text) {
   banner.classList.add('show');
 }
 
-function sizeCanvas() {
-  if (!nActive) return;
-  canvas.width = nActive;
+function updateTopCalibPill() {
+  const calibrating = Object.values(nodes).filter(n => n.discovered && n.calibText);
+  if (calibrating.length > 0) {
+    setPill(calibDot, calibStatusText, 'warn', calibrating.map(n => `${n.id}: ${n.calibText}`).join(' · '));
+  } else {
+    setPill(calibDot, calibStatusText, 'good', 'Ready');
+  }
+}
+
+function updateNodeTile(node) {
+  const dotEl = document.getElementById(`node-dot-${node.id}`);
+  const statusEl = document.getElementById(`node-status-${node.id}`);
+  const calibDotEl = document.getElementById(`calib-node-dot-${node.id}`);
+  if (!dotEl || !statusEl) return;
+  if (node.calibText) {
+    dotEl.className = 'pill-dot warn';
+    statusEl.className = 'node-status';
+    statusEl.textContent = node.calibText;
+  } else if (node.confirmed === 'MOVING') {
+    dotEl.className = 'pill-dot bad';
+    statusEl.className = 'node-status moving';
+    statusEl.textContent = `MOVING${typeof node.confidence === 'number' ? ` (${Math.round(node.confidence * 100)}%)` : ''}`;
+  } else if (node.confirmed === 'EMPTY') {
+    dotEl.className = 'pill-dot good';
+    statusEl.className = 'node-status empty';
+    statusEl.textContent = `EMPTY${typeof node.confidence === 'number' ? ` (${Math.round(node.confidence * 100)}%)` : ''}`;
+  } else {
+    dotEl.className = 'pill-dot';
+    statusEl.className = 'node-status';
+    statusEl.textContent = 'warming up…';
+  }
+  if (calibDotEl) calibDotEl.className = 'pill-dot ' + (node.calibText ? 'warn' : 'good');
+}
+
+function sizeCanvasFor(node) {
+  if (!node.nActive) return;
+  canvas.width = node.nActive;
   canvas.height = HISTORY_ROWS;
 }
 
-let lastFrameAt = null;
-
 function onFrame(msg) {
-  if (nActive === null) return;
+  const node = getNode(msg.node || 'A');
+  // Tracked here (not just inside onFrameInner) so it stays accurate even
+  // for a node that isn't currently selected - the Nodes-card tile and the
+  // single-node confidence ring both read this.
+  if (msg.confidence !== null && msg.confidence !== undefined) node.confidence = msg.confidence;
+  if (node.nActive === null) return;
 
   // A row-length mismatch (e.g. the server restarted mid-session and
   // recomputed a different active-subcarrier count without the page
   // re-syncing) would throw inside .set() below - and since that's before
-  // every other update in this function, EVERY future frame would throw at
-  // the same spot and the whole dashboard would look permanently frozen
-  // while the socket stays open and "Connected". Skip instead of crashing.
-  if (!Array.isArray(msg.row) || msg.row.length !== nActive) {
-    console.warn(`Dropping frame: row length ${msg.row && msg.row.length} != nActive ${nActive}`);
+  // every other update for this node, EVERY future frame would throw at
+  // the same spot. Skip instead of crashing.
+  if (!Array.isArray(msg.row) || msg.row.length !== node.nActive) {
+    console.warn(`Dropping frame from node ${node.id}: row length ${msg.row && msg.row.length} != nActive ${node.nActive}`);
     return;
   }
 
-  lastFrameAt = Date.now();
+  node.lastFrameAt = Date.now();
   try {
-    onFrameInner(msg);
+    onFrameInner(node, msg);
   } catch (err) {
-    console.error('onFrame failed, will retry on next frame:', err);
+    console.error(`onFrame (node ${node.id}) failed, will retry on next frame:`, err);
   }
 }
 
-function onFrameInner(msg) {
-  // scroll waterfall up by one row, append new row at the bottom
-  waterfallData.copyWithin(0, nActive);
-  waterfallData.set(msg.row, (HISTORY_ROWS - 1) * nActive);
+function onFrameInner(node, msg) {
+  // scroll this node's waterfall up by one row, append the new row at the bottom
+  node.waterfallData.copyWithin(0, node.nActive);
+  node.waterfallData.set(msg.row, (HISTORY_ROWS - 1) * node.nActive);
 
-  if (clim === null) {
-    calibSamples.push(...msg.row);
-    if (calibSamples.length >= 30 * nActive) {
-      const sorted = [...calibSamples].sort((a, b) => a - b);
+  if (node.clim === null) {
+    node.calibSamples.push(...msg.row);
+    if (node.calibSamples.length >= 30 * node.nActive) {
+      const sorted = [...node.calibSamples].sort((a, b) => a - b);
       const pct = (p) => sorted[Math.floor(sorted.length * p)];
-      clim = [pct(0.02), pct(0.98)];
+      node.clim = [pct(0.02), pct(0.98)];
     }
   }
-  drawWaterfall();
 
+  node.rssi = msg.rssi;
+  node.energy = msg.energy;
+
+  const rssiEl = document.getElementById(`node-rssi-${node.id}`);
+  const energyEl = document.getElementById(`node-energy-${node.id}`);
+  if (rssiEl) rssiEl.textContent = `${msg.rssi.toFixed(0)} dBm`;
+  if (energyEl) energyEl.textContent = msg.energy !== null ? msg.energy.toFixed(2) : '–';
+
+  if (msg.energy !== null) {
+    node.energyHistory.push(msg.energy);
+    if (node.energyHistory.length > ENERGY_HISTORY) node.energyHistory.shift();
+  }
+
+  // Everything below only touches the DOM for the currently-selected node -
+  // the other node keeps accumulating its own buffers in the background so
+  // switching to it later shows its real recent history, not a blank chart.
+  if (node.id !== selectedNode) return;
+
+  drawWaterfallFor(node);
   if (!metaStarted) { metaStarted = true; clearSkeleton(metaRssi, metaEnergy, metaBuffer); }
   metaRssi.textContent = `${msg.rssi.toFixed(0)} dBm`;
   metaEnergy.textContent = msg.energy !== null ? msg.energy.toFixed(2) : '–';
   metaBuffer.textContent = `${msg.buffered}/${msg.window_frames} frames`;
-
   if (msg.energy !== null) {
-    energyHistory.push(msg.energy);
-    if (energyHistory.length > ENERGY_HISTORY) energyHistory.shift();
-    drawEnergy();
-    drawBadgeWave();
+    drawEnergyFor(node);
+    drawBadgeWaveFor(node);
   }
+  metaRaw.textContent = msg.raw_prediction
+    ? `this window: ${msg.raw_prediction} (${Math.round(msg.raw_confidence * 100)}%)`
+    : '';
+}
 
-  if (msg.prediction) {
-    // msg.prediction is the SMOOTHED/confirmed state (majority of last 5
-    // windows) - what's displayed. msg.raw_prediction is this window alone.
-    const isMoving = msg.prediction === 'MOVING';
-    setBadge(isMoving ? 'moving' : 'empty', isMoving ? 'moving' : 'empty',
-             msg.prediction, `${Math.round(msg.confidence * 100)}% confidence`, msg.confidence);
-    metaRaw.textContent = msg.raw_prediction
-      ? `this window: ${msg.raw_prediction} (${Math.round(msg.raw_confidence * 100)}%)`
-      : '';
-    predUpdated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
-    onConfirmedPrediction(msg.prediction);
-  } else {
-    setBadge('warming', 'warm', 'Warming up…', `${msg.buffered}/${msg.window_frames} frames buffered`);
-    metaRaw.textContent = '';
+// ---------------- Combined (OR'd) prediction -> the hero badge ----------------
+function describeCombined(nodeMap, overall) {
+  const ids = Object.keys(nodeMap);
+  if (ids.length <= 1) return null; // single-node mode: nothing extra to say
+  if (overall === 'MOVING') {
+    const contributors = ids.filter(id => nodeMap[id] === 'MOVING');
+    return `confirmed by ${contributors.map(id => 'node ' + id).join(' + ')}`;
   }
+  if (overall === 'EMPTY') {
+    return `confirmed empty by all ${ids.length} nodes`;
+  }
+  return null;
+}
+
+function onCombined(msg) {
+  Object.entries(msg.nodes).forEach(([id, prediction]) => {
+    const node = getNode(id);
+    node.confirmed = prediction;
+    updateNodeTile(node);
+  });
+
+  const overall = msg.prediction; // 'EMPTY' | 'MOVING' | null
+  const ids = Object.keys(msg.nodes);
+  const single = ids.length === 1 ? nodes[ids[0]] : null;
+
+  if (overall === null) {
+    setBadge('warming', 'warm', 'Warming up…', 'waiting for calibration to finish');
+    return;
+  }
+  const isMoving = overall === 'MOVING';
+  const note = describeCombined(msg.nodes, overall) ||
+    (single && typeof single.confidence === 'number' ? `${Math.round(single.confidence * 100)}% confidence` : '');
+  setBadge(isMoving ? 'moving' : 'empty', isMoving ? 'moving' : 'empty', overall, note,
+            single ? single.confidence : undefined);
+  predUpdated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  onConfirmedPrediction(overall);
 }
 
 function mixColor(hexA, hexB, t) {
@@ -903,12 +1139,13 @@ function hexToRgb(hex) {
 const seqLo = getComputedStyle(document.documentElement).getPropertyValue('--seq-lo').trim() || '#cde2fb';
 const seqHi = getComputedStyle(document.documentElement).getPropertyValue('--seq-hi').trim() || '#104281';
 
-function drawWaterfall() {
-  const img = ctx.createImageData(nActive, HISTORY_ROWS);
-  const [lo, hi] = clim || [0, 1];
+function drawWaterfallFor(node) {
+  if (!node.waterfallData || node.id !== selectedNode) return;
+  const img = ctx.createImageData(node.nActive, HISTORY_ROWS);
+  const [lo, hi] = node.clim || [0, 1];
   const range = Math.max(1e-6, hi - lo);
-  for (let i = 0; i < waterfallData.length; i++) {
-    let t = (waterfallData[i] - lo) / range;
+  for (let i = 0; i < node.waterfallData.length; i++) {
+    let t = (node.waterfallData[i] - lo) / range;
     t = Math.max(0, Math.min(1, t));
     const [r, g, b] = mixColor(seqLo, seqHi, t);
     const o = i * 4;
@@ -923,7 +1160,8 @@ const energyTooltip = document.getElementById('energy-tooltip');
 const energyHolder = svg.parentElement; // .chart-holder, tooltip positions relative to this
 let lastEnergyGeom = null; // geometry from the most recent draw, used to map hover position -> data point
 
-function drawEnergy() {
+function drawEnergyFor(node) {
+  const energyHistory = node.energyHistory;
   const W = svg.clientWidth || 640, H = 140;
   const padL = 40, padR = 12, padT = 10, padB = 24;
   const plotW = W - padL - padR, plotH = H - padT - padB;
@@ -961,12 +1199,12 @@ function drawEnergy() {
     (n > 0 ? `<circle class="energy-endpoint" cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" />` : '');
 }
 
-// Small reactive waveform behind the hero badge label - same energyHistory
-// data as the main chart, just windowed to the last ~30 samples and redrawn
-// on its own tight viewBox so it reads as a live pulse, not a shrunk copy.
-function drawBadgeWave() {
+// Small reactive waveform behind the hero badge label - the SELECTED
+// node's energyHistory, windowed to the last ~30 samples and redrawn on
+// its own tight viewBox so it reads as a live pulse, not a shrunk copy.
+function drawBadgeWaveFor(node) {
   const N = 30;
-  const recent = energyHistory.slice(-N);
+  const recent = node.energyHistory.slice(-N);
   if (recent.length < 2) { badgeWave.innerHTML = ''; return; }
   const maxV = Math.max(4, ...recent);
   const W = 200, H = 28;
@@ -979,7 +1217,7 @@ function drawBadgeWave() {
   badgeWave.innerHTML = `<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`;
 }
 
-// Plain HTML tooltip (not an SVG element) so it survives drawEnergy()
+// Plain HTML tooltip (not an SVG element) so it survives drawEnergyFor()
 // overwriting the SVG's innerHTML on every incoming frame - an SVG-based
 // crosshair would get wiped out mid-hover on a live-updating chart.
 svg.addEventListener('mousemove', (ev) => {
@@ -988,6 +1226,7 @@ svg.addEventListener('mousemove', (ev) => {
   const mouseXInViewBox = ((ev.clientX - rect.left) / rect.width) * lastEnergyGeom.W;
   const frac = (mouseXInViewBox - lastEnergyGeom.padL) / lastEnergyGeom.plotW;
   const idx = Math.round(frac * (ENERGY_HISTORY - 1));
+  const energyHistory = nodes[selectedNode].energyHistory;
   if (idx < 0 || idx >= energyHistory.length) {
     energyTooltip.classList.remove('show');
     return;
@@ -1001,7 +1240,10 @@ svg.addEventListener('mousemove', (ev) => {
 });
 svg.addEventListener('mouseleave', () => energyTooltip.classList.remove('show'));
 
-window.addEventListener('resize', () => { if (energyHistory.length) drawEnergy(); });
+window.addEventListener('resize', () => {
+  const node = nodes[selectedNode];
+  if (node && node.energyHistory.length) drawEnergyFor(node);
+});
 </script>
 </body>
 </html>

@@ -5,10 +5,23 @@ Reads the ESP32 CSI stream, runs csi_model.joblib on a rolling window (same
 parsing and feature math as csi_live_predict.py, imported not duplicated),
 and pushes JSON frames to any browser tab connected on ws://localhost:8765.
 
+Supports one or two independent nodes. Each node is a completely separate
+ESP32 with its own serial port, its own calibration baseline, its own
+rolling window, and its own confirmed prediction - the two never share
+state. With two nodes, their confirmed predictions are combined with OR
+logic ("either node confirms MOVING -> the room is MOVING") and broadcast
+as a third "combined" message, alongside each node's own status. This is
+deliberately NOT a shared/synchronized feature vector across nodes: two
+independent single-node pipelines, OR'd together, directly attacks the
+off-axis blind spot (a person off-axis for one node's ESP32<->router line
+can still be on-axis for the other's) without needing any new training
+data or any timestamp synchronization between the two boards.
+
 Run this first, then open csi_dashboard.html in a browser.
 
 Usage:
     python csi_live_server.py -p COM9 -b 115200
+    python csi_live_server.py -p COM9 --port-b COM10 -b 115200   # two nodes
 
 Deps:
     python -m pip install pyserial joblib scikit-learn websockets numpy
@@ -42,14 +55,14 @@ from csi_common import (CALIB_SECONDS_DEFAULT, LABEL_NAMES, PredictionSmoother,
                          RollingCalibrator, compute_baseline, make_features, parse_line)
 
 
-def serial_reader_thread(port, baud, out_queue, stop_event):
+def serial_reader_thread(port, baud, out_queue, stop_event, node_id):
     try:
         ser = serial.Serial(port, baud, timeout=0.1)
     except serial.SerialException as e:
-        print(f"[serial] Could not open {port}: {e}", flush=True)
-        out_queue.put({"type": "error", "message": f"Could not open {port}: {e}"})
+        print(f"[serial:{node_id}] Could not open {port}: {e}", flush=True)
+        out_queue.put({"type": "error", "node": node_id, "message": f"Could not open {port}: {e}"})
         return
-    print(f"[serial] {port} opened @ {baud}. Waiting for data "
+    print(f"[serial:{node_id}] {port} opened @ {baud}. Waiting for data "
           f"(ESP32 usually resets on port-open, so this can take ~10-15s: "
           f"boot + Wi-Fi connect + the firmware's built-in delay before CSI starts)...",
           flush=True)
@@ -65,7 +78,7 @@ def serial_reader_thread(port, baud, out_queue, stop_event):
                 n = ser.in_waiting
                 data = ser.read(n if n else 1)
             except Exception as e:
-                print(f"[serial] read error: {e}", flush=True)
+                print(f"[serial:{node_id}] read error: {e}", flush=True)
                 continue
             if data:
                 total_bytes += len(data)
@@ -81,17 +94,17 @@ def serial_reader_thread(port, baud, out_queue, stop_event):
                     elif total_lines <= 5 or parsed_lines == 0:
                         # Show what the device IS sending (boot logs, Wi-Fi
                         # status, etc.) until we've seen at least one good frame.
-                        print(f"[serial] non-CSI line: {ln.strip()[:120]}", flush=True)
+                        print(f"[serial:{node_id}] non-CSI line: {ln.strip()[:120]}", flush=True)
 
             now = time.monotonic()
             if now - last_report > 3:
                 last_report = now
-                print(f"[serial] {total_bytes} bytes, {total_lines} lines, "
+                print(f"[serial:{node_id}] {total_bytes} bytes, {total_lines} lines, "
                       f"{parsed_lines} parsed as CSI so far", flush=True)
                 if total_bytes == 0:
-                    print("[serial] Zero bytes received - wrong COM port, "
+                    print(f"[serial:{node_id}] Zero bytes received - wrong COM port, "
                           "device not powered, or nothing else transmitting.", flush=True)
-                    out_queue.put({"type": "warning",
+                    out_queue.put({"type": "warning", "node": node_id,
                         "message": "No serial data received at all - check the port/device."})
     finally:
         ser.close()
@@ -100,8 +113,9 @@ def serial_reader_thread(port, baud, out_queue, stop_event):
 async def broadcast(clients, msg, last_status=None):
     # Remember non-frame status messages so a client that connects AFTER
     # this was sent still finds out (frames are too frequent to replay).
+    # Keyed by type+node so node A's status can't overwrite node B's.
     if last_status is not None and msg.get("type") != "frame":
-        last_status[msg["type"]] = msg
+        last_status[f"{msg['type']}:{msg.get('node', '-')}"] = msg
     if not clients:
         return
     data = json.dumps(msg)
@@ -119,7 +133,22 @@ async def broadcast(clients, msg, last_status=None):
         clients.discard(ws)
 
 
-async def pump(out_queue, clients, model_bundle, last_status, control):
+def compute_combined(combined_state):
+    """OR logic: any node confirming MOVING is immediate MOVING (don't wait
+    for a still-calibrating second node to catch what the first already
+    caught). Only reports EMPTY once every configured node has confirmed
+    something and none of them is MOVING. None means "still warming up" -
+    genuinely unknown yet, not "probably empty"."""
+    values = list(combined_state.values())
+    if "MOVING" in values:
+        return "MOVING"
+    if values and all(v == "EMPTY" for v in values):
+        return "EMPTY"
+    return None
+
+
+async def pump(out_queue, clients, model_bundle, last_status, control, node_id,
+                combined_state, last_combined_broadcast):
     loop = asyncio.get_running_loop()
     clf = model_bundle["model"]
     n_expected = len(model_bundle["amp_columns"])
@@ -140,6 +169,13 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
     active_idx = None
     warned_mismatch = False
 
+    async def broadcast_combined_if_changed():
+        overall = compute_combined(combined_state)
+        if overall != last_combined_broadcast[0]:
+            last_combined_broadcast[0] = overall
+            await broadcast(clients, {"type": "combined", "prediction": overall,
+                                       "nodes": dict(combined_state)}, last_status)
+
     while True:
         if control.get("recalibrate"):
             control["recalibrate"] = False
@@ -149,7 +185,9 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
             rssi_buf.clear()
             smoother.reset()
             roller.reset()
-            print("[predict] Forced recalibration requested - restarting calibration phase.", flush=True)
+            combined_state[node_id] = None
+            await broadcast_combined_if_changed()
+            print(f"[predict:{node_id}] Forced recalibration requested - restarting calibration phase.", flush=True)
 
         try:
             item = out_queue.get_nowait()
@@ -158,7 +196,7 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
             continue
 
         if item["type"] in ("error", "warning"):
-            await broadcast(clients, item, last_status)
+            await broadcast(clients, {**item, "node": node_id}, last_status)
             continue
 
         rssi, amps = item["rssi"], item["amps"]
@@ -168,14 +206,30 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
             active_idx = np.where(np.abs(amps) > 0)[0]
             if len(active_idx) == 0:
                 active_idx = np.arange(n_subcarriers)
-            await broadcast(clients, {"type": "init", "n_subcarriers": int(n_subcarriers),
+            await broadcast(clients, {"type": "init", "node": node_id,
+                                       "n_subcarriers": int(n_subcarriers),
                                        "n_active": int(len(active_idx))}, last_status)
         if len(amps) != n_subcarriers:
             continue
-        if n_subcarriers != n_expected and not warned_mismatch:
+        subcarrier_mismatch = n_subcarriers != n_expected
+        if subcarrier_mismatch and not warned_mismatch:
             warned_mismatch = True
-            await broadcast(clients, {"type": "warning",
-                "message": f"Stream has {n_subcarriers} subcarriers, model expects {n_expected}."}, last_status)
+            # A mismatch here means the feature vector this node would build
+            # can never match what the model was trained on (e.g. the AP
+            # auto-negotiated a 40MHz channel, doubling subcarriers from 128
+            # to 192) - calling predict_proba() on it doesn't just give a bad
+            # answer, it raises inside sklearn (wrong feature count) and,
+            # left unguarded, that exception used to propagate out of this
+            # task and crash the ENTIRE server via asyncio.gather - taking
+            # every other node down too. Below, prediction is skipped for
+            # this node instead: it keeps streaming raw waterfall/energy
+            # data and stays visibly in "warming up" rather than either
+            # crashing or silently producing garbage predictions.
+            await broadcast(clients, {"type": "warning", "node": node_id,
+                "message": f"Stream has {n_subcarriers} subcarriers, model expects {n_expected} - "
+                           f"predictions disabled for this node until it matches "
+                           f"(likely the AP changed channel width; a 20MHz-only AP is required)."},
+                last_status)
 
         # ---- Calibration phase: leave the room, buffer confirmed-empty
         # frames, compute the baseline every window is scored against. ----
@@ -185,6 +239,7 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
             remaining = max(0, calib_frames - len(calib_amp_buf))
             await broadcast(clients, {
                 "type": "calibrating",
+                "node": node_id,
                 "buffered": len(calib_amp_buf),
                 "calib_frames": calib_frames,
                 "remaining_seconds": remaining / frame_hz,
@@ -192,9 +247,9 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
             if len(calib_amp_buf) >= calib_frames:
                 baseline = compute_baseline(calib_amp_buf, calib_rssi_buf)
                 roller.set_floor_reference(baseline)
-                await broadcast(clients, {"type": "calibrated",
+                await broadcast(clients, {"type": "calibrated", "node": node_id,
                     "at_unix_ms": int(time.time() * 1000)}, last_status)
-                print(f"[predict] Calibrated on {len(calib_amp_buf)} frames.", flush=True)
+                print(f"[predict:{node_id}] Calibrated on {len(calib_amp_buf)} frames.", flush=True)
             continue  # calibration frames don't get scored
 
         amp_buf.append(amps)
@@ -206,13 +261,17 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
 
         prediction, confidence = None, None
         raw_prediction, raw_confidence = None, None
-        if len(amp_buf) == window_frames:
+        confirmed_label = None
+        if len(amp_buf) == window_frames and not subcarrier_mismatch:
             feat = make_features(list(amp_buf), list(rssi_buf), baseline)
             # A single predict_proba() in a thread executor: one forest walk
             # instead of two (predict() + predict_proba() separately), and
             # off the event loop entirely so a slow prediction can never
             # delay WebSocket ping/pong keepalives (that stall is what was
             # producing "keepalive ping timeout" disconnects under load).
+            # Sharing one loaded model across both nodes' executor calls is
+            # safe: predict_proba() only reads the fitted trees, never
+            # mutates them, so concurrent calls from two nodes can't race.
             proba = (await loop.run_in_executor(None, clf.predict_proba, feat))[0]
             best_idx = int(np.argmax(proba))
             pred = clf.classes_[best_idx]
@@ -223,6 +282,9 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
             if confirmed_label is not None:
                 prediction = LABEL_NAMES.get(confirmed_label, str(confirmed_label))
                 confidence = vote_fraction
+                if combined_state.get(node_id) != prediction:
+                    combined_state[node_id] = prediction
+                    await broadcast_combined_if_changed()
 
             # Mirrors train_model.py's per-empty-block recalibration: once
             # confirmed empty for a full calib_frames stretch, quietly
@@ -232,13 +294,14 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
             new_baseline = roller.observe(confirmed_label, amp_buf[-1], rssi_buf[-1], baseline)
             if new_baseline is not None:
                 baseline = new_baseline
-                await broadcast(clients, {"type": "recalibrated",
+                await broadcast(clients, {"type": "recalibrated", "node": node_id,
                     "at_unix_ms": int(time.time() * 1000)}, last_status)
-                print(f"[predict] Recalibrated (rolling, {calib_frames} confirmed-empty frames).",
+                print(f"[predict:{node_id}] Recalibrated (rolling, {calib_frames} confirmed-empty frames).",
                       flush=True)
 
         await broadcast(clients, {
             "type": "frame",
+            "node": node_id,
             "row": amps[active_idx].tolist(),
             "rssi": rssi,
             "energy": energy,
@@ -252,18 +315,32 @@ async def pump(out_queue, clients, model_bundle, last_status, control):
 
 
 async def main_async(args, model_bundle):
-    out_queue = queue.Queue()
-    stop_event = threading.Event()
     clients = set()
-    last_status = {}  # type -> most recent message of that type (error/warning/init)
-    control = {"recalibrate": False}  # dashboard -> pump() one-way signal
+    last_status = {}  # "type:node" -> most recent message of that kind (error/warning/init/...)
 
-    reader = threading.Thread(
-        target=serial_reader_thread,
-        args=(args.port, args.baud, out_queue, stop_event),
-        daemon=True,
-    )
-    reader.start()
+    nodes = [("A", args.port)]
+    if args.port_b:
+        nodes.append(("B", args.port_b))
+
+    combined_state = {node_id: None for node_id, _ in nodes}
+    last_combined_broadcast = [None]  # mutable box, shared across pump() tasks
+
+    stop_event = threading.Event()
+    control = {node_id: {"recalibrate": False} for node_id, _ in nodes}
+    tasks = []
+
+    for node_id, port in nodes:
+        out_queue = queue.Queue()
+        reader = threading.Thread(
+            target=serial_reader_thread,
+            args=(port, args.baud, out_queue, stop_event, node_id),
+            daemon=True,
+        )
+        reader.start()
+        tasks.append(asyncio.create_task(
+            pump(out_queue, clients, model_bundle, last_status, control[node_id], node_id,
+                 combined_state, last_combined_broadcast)
+        ))
 
     async def handler(ws):
         clients.add(ws)
@@ -278,17 +355,20 @@ async def main_async(args, model_bundle):
         try:
             # async for (instead of wait_closed) so the dashboard can send
             # commands back - currently just a manual "recalibrate" request,
-            # for when the system gets stuck reading MOVING in an empty
-            # room and needs a way out that doesn't require restarting the
-            # whole server.
+            # for when a node gets stuck reading MOVING in an empty room and
+            # needs a way out that doesn't require restarting the server.
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
                 except (json.JSONDecodeError, TypeError):
                     continue
                 if msg.get("type") == "recalibrate":
-                    control["recalibrate"] = True
-                    print("[server] Recalibration requested by a client.", flush=True)
+                    target = msg.get("node", "all")
+                    targets = control.keys() if target in ("all", None) else [target]
+                    for t in targets:
+                        if t in control:
+                            control[t]["recalibrate"] = True
+                    print(f"[server] Recalibration requested by a client (node={target}).", flush=True)
         finally:
             clients.discard(ws)
             print(f"Client disconnected ({len(clients)} total)")
@@ -301,13 +381,17 @@ async def main_async(args, model_bundle):
     async with websockets.serve(handler, "localhost", args.ws_port,
                                  ping_interval=20, ping_timeout=60):
         print(f"WebSocket server on ws://localhost:{args.ws_port}")
+        print(f"Nodes: {', '.join(f'{n}={p}' for n, p in nodes)}")
         print("Open csi_dashboard.html in a browser to view.")
-        await pump(out_queue, clients, model_bundle, last_status, control)
+        await asyncio.gather(*tasks)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Serial -> WebSocket bridge with live model prediction.")
-    ap.add_argument("-p", "--port", default="COM9")
+    ap = argparse.ArgumentParser(description="Serial -> WebSocket bridge with live model prediction. "
+                                              "Supports one node, or two independent nodes OR'd together.")
+    ap.add_argument("-p", "--port", default="COM9", help="Serial port for node A.")
+    ap.add_argument("--port-b", default=None, help="Serial port for a second, independent node (node B). "
+                                                     "Omit to run single-node, exactly as before.")
     ap.add_argument("-b", "--baud", type=int, default=115200)
     ap.add_argument("--model", default="csi_model.joblib")
     ap.add_argument("--ws-port", type=int, default=8765)
@@ -319,7 +403,7 @@ def main():
           f"{bundle['window_seconds']}s window @ {bundle['frame_hz']} Hz, "
           f"{calib_seconds}s calibration")
     print(f"IMPORTANT: leave the room for the first {calib_seconds}s after "
-          f"data starts flowing - that's the calibration window.")
+          f"data starts flowing on EACH node - that's the calibration window.")
 
     try:
         asyncio.run(main_async(args, bundle))

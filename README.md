@@ -1,14 +1,16 @@
 # CSI Motion Detection
 
-Device-free motion detection using Wi-Fi Channel State Information (CSI) on a
-single ESP32-S3 — no camera, no wearable. A person moving through a room
-disturbs the multipath propagation between the ESP32 and the router in a way
-an empty room doesn't, and CSI (which every Wi-Fi receiver already computes
-internally to decode data) captures that disturbance as a side effect.
+Device-free motion detection using Wi-Fi Channel State Information (CSI) on
+one or two ESP32-S3 boards — no camera, no wearable. A person moving through
+a room disturbs the multipath propagation between the ESP32 and the router
+in a way an empty room doesn't, and CSI (which every Wi-Fi receiver already
+computes internally to decode data) captures that disturbance as a side
+effect.
 
-**Current state**: Random Forest classifier, 8 labeled recording sessions,
-**95.54% leave-one-session-out accuracy**, with a live desktop tool and a
-browser dashboard for real-time monitoring.
+**Current state**: Random Forest classifier, 10 labeled recording sessions
+across 2 rooms, **95.07% leave-one-session-out accuracy**, with a live
+desktop tool and a browser dashboard supporting one or two ESP32 nodes
+(combined via OR logic) for real-time monitoring.
 
 ---
 
@@ -16,13 +18,14 @@ browser dashboard for real-time monitoring.
 
 ```mermaid
 flowchart TD
-    A[ESP32-S3 firmware] -->|CSI over serial, ~10Hz| B[csi_label_collector.py]
+    A[ESP32-S3 node A] -->|CSI over serial, ~10Hz| B[csi_label_collector.py]
     A -->|CSI over serial| E[csi_live_server.py / csi_live_predict.py]
-    B -->|labeled CSVs| C[part_1_data ... part_8_data]
+    A2[ESP32-S3 node B, optional] -->|CSI over serial| E
+    B -->|labeled CSVs| C[part_1_data ... part_8_data, room2_part_1_data, room2_part_2_data]
     C --> D[train_model.py]
     D -->|per-session-out validated| F[csi_model.joblib]
     F --> E
-    E -->|WebSocket| G[csi_dashboard.html]
+    E -->|WebSocket, per-node + OR-combined| G[csi_dashboard.html]
     E --> H[Matplotlib live view]
 ```
 
@@ -45,9 +48,10 @@ flowchart TD
 
 | Check | Result |
 |---|---|
-| Leave-one-session-out accuracy (8 sessions) | **95.54%** |
+| Leave-one-session-out accuracy (10 sessions, 2 rooms) | **95.07%** |
 | Best of 6 compared model families (RF, Gradient Boosting, Logistic Regression, SVM×2, KNN) | Random Forest wins outright, lowest variance too |
 | True held-out session tests (trained on all others, scored once on a session never touched) | 91-99% across 4 independently tested sessions |
+| Cross-room held-out test (trained on room 1 only, scored on an untouched room 2 session) | 82.5% |
 | Live reaction window | 0.75s (tuned — the best accuracy/speed tradeoff of 4 tested window sizes) |
 
 Every one of those numbers came from actually running the scripts in this
@@ -99,13 +103,15 @@ train_model.py              Trains + leave-one-session-out validates the model
 evaluate_holdout.py         True held-out evaluation on a named session
 analyze_model.py            Dumps fold accuracy / feature importance / etc. as JSON
 compare_models.py           Compares 6 ML model families under identical validation
+full_model_report.py        Generic LOSO evaluation report generator (16 metrics, ~20 figures, PDF)
 
 csi_live_predict.py         Matplotlib desktop live inference tool
-csi_live_server.py          WebSocket backend for the browser dashboard
-csi_dashboard.html          Browser dashboard: waterfall, motion energy, live status
+csi_live_server.py          WebSocket backend for the browser dashboard, supports 1 or 2 ESP32 nodes (--port-b)
+csi_dashboard.html          Browser dashboard: waterfall, motion energy, live status, per-node view
 
-part_1_data/ .. part_8_data/  Labeled recording sessions (see docs/PROJECT_HISTORY.md
-                               section "Recording sessions in detail" for what each one is)
+part_1_data/ .. part_8_data/       Labeled recording sessions, room 1 (see docs/PROJECT_HISTORY.md
+                                    section "Recording sessions in detail" for what each one is)
+room2_part_1_data/, room2_part_2_data/  Labeled recording sessions, room 2 (cross-room test)
 csi_model.joblib             The trained, deployed model
 
 report/csi_report.tex        LaTeX writeup (for Overleaf)
@@ -160,26 +166,42 @@ python csi_live_server.py -p COM9 -b 115200
 # then open csi_dashboard.html in any browser
 ```
 
-Only one program can hold the serial port at a time — close the IDF monitor
-or the collector before running a live inference tool.
+With a second ESP32 node (recommended — see "Off-axis blind spot" below),
+add `--port-b`:
+```
+python csi_live_server.py -p COM9 --port-b COM6 -b 115200
+```
+The dashboard's "Nodes" card shows both live; the hero prediction is the two
+nodes' states combined with OR (MOVING if either node says MOVING). For the
+coverage benefit to actually matter, place the two boards apart from each
+other (e.g. diagonally opposite corners of the room), not side by side.
+
+Only one program can hold a given serial port at a time — close the IDF
+monitor or the collector before running a live inference tool.
 
 ---
 
 ## Known limitations
 
-- **Single room only.** The model has only ever been trained on one room.
-  Cross-room generalization is an open, actively-being-tested question — see
+- **Only 2 rooms tested.** Cross-room generalization has been tested once
+  (82.5% held out, 95.07% after folding both room-2 sessions into
+  training) — real evidence it transfers, but only across 2 rooms so far. A
+  third, different room is the natural next test — see
   `docs/PROJECT_HISTORY.md` for the current status.
-- **Off-axis blind spot.** Movement more than ~1m off the direct line between
-  the ESP32 and the router is detected much more weakly — this is physics
-  (single-link CSI sensitivity is strongest near that direct path), not a
-  bug. Fixable by repositioning the hardware, or by adding a second node.
+- **Off-axis blind spot — mitigated, not eliminated.** Movement more than
+  ~1m off the direct line between an ESP32 and the router is detected much
+  more weakly on that node — this is physics (single-link CSI sensitivity
+  is strongest near the direct path), not a bug. Running two physically
+  separated nodes (see `--port-b` below), combined via OR logic, covers
+  each other's blind spots and has been confirmed live to improve coverage;
+  each individual node still has its own.
 - **One person, one movement style.** All training data so far is one
   person's walking. Not yet tested against a different person or movement
-  type.
+  type — the single biggest remaining generalization gap.
 - **Not true position/localization.** This detects *whether* someone is
-  moving, not *where*. Real position tracking needs multiple antennas or
-  multiple receiver nodes, which this single-ESP32 setup doesn't have.
+  moving, not *where*. Real position tracking needs phase data and multiple
+  synchronized antennas, which this amplitude-only, unsynchronized setup
+  doesn't have — even with 2 nodes.
 
 ---
 
