@@ -40,7 +40,16 @@ LABEL_NAMES = {0: "EMPTY", 2: "MOVING"}
 def parse_line(line):
     """Return (rssi, amps) or None. Firmware format:
     CSI_AMP,<ts_us>,<label>,<num_subcarriers>,<rssi>,<amp0>,<amp1>,...
-    """
+
+    The firmware states how many subcarriers it is about to send (field 3),
+    so the count is CHECKED against how many actually arrived rather than
+    trusting whatever made it down the wire. A line mangled in transit -
+    dropped bytes on the UART, a decode("utf-8", errors="ignore") swallowing
+    a chunk mid-line - can still contain the marker and still split into
+    enough fields to look valid, just with some amplitudes missing. Without
+    this check that silently becomes a short amplitude array; and because
+    the live tools latch their subcarrier count from the FIRST frame they
+    see, one mangled first line would mis-size the entire session."""
     i = line.find(MARKER)
     if i == -1:
         return None
@@ -48,9 +57,12 @@ def parse_line(line):
     if len(parts) < 6 or parts[0] != "CSI_AMP":
         return None
     try:
+        declared_n = int(parts[3])
         rssi = float(parts[4])
         amps = np.array([float(x) for x in parts[5:]])
     except ValueError:
+        return None
+    if declared_n != len(amps):
         return None
     return rssi, amps
 
@@ -95,6 +107,105 @@ def compute_baseline(amp_frames, rssi_frames):
 TOP_K = 10          # how many subcarriers count as "the disturbed ones"
 ELEVATED_RATIO = 1.5  # a subcarrier counts as "elevated" above this std ratio
 ENERGY_STD_FLOOR = 0.05  # same dead-denominator problem as amp_std, fixed scale is fine here
+
+
+# --- Empty-room noise floor -------------------------------------------------
+# How disturbed the room looks while EMPTY. The metric is the mean
+# frame-to-frame amplitude change DIVIDED BY the mean amplitude - i.e. jitter
+# as a FRACTION of signal, not in raw amplitude units.
+#
+# The division matters and was learned the hard way. The first version of this
+# used raw amplitude change, which is fine for watching ONE node over time but
+# is wrong for comparing two nodes: a board receiving a weaker signal has
+# proportionally smaller amplitudes, so its raw frame-to-frame differences are
+# smaller too. Measured on this project's two boards sitting at the SAME spot:
+#
+#     node A   RSSI -47.0   amplitude 32.1   raw 1.63   relative 0.051
+#     node B   RSSI -59.3   amplitude 16.6   raw 1.17   relative 0.071
+#
+# On the raw scale node B looks CLEANER than node A. It is not - it receives
+# 12dB less signal and is actually 39% noisier relative to what it receives.
+# Dividing by amplitude makes the two nodes comparable.
+#
+# Thresholds are read off this project's OWN 10 recorded sessions, not picked
+# by feel. Relative floor, then how far apart empty/moving energy ended up
+# (the "separation"), then that session's held-out accuracy:
+#
+#     part_1        0.0248   4.67x   96.0%
+#     part_4        0.0258   3.80x   95.7%
+#     part_2        0.0312   3.13x   98.7%
+#     part_3        0.0357   2.88x   98.7%
+#     part_5        0.0445   5.96x   95.3%
+#     part_7        0.0995   1.36x   94.0%
+#     room2_part_2  0.1374   1.89x   98.4%
+#     part_8        0.2162   0.99x   95.0%
+#     part_6        0.2207   1.02x   94.3%
+#     room2_part_1  0.2208   1.02x   84.7%
+#
+# Above ~0.15 the aggregate motion signal has essentially vanished (empty and
+# moving energy within ~2% of each other) and only finer per-subcarrier
+# structure still separates the classes.
+#
+# BE HONEST ABOUT WHAT THIS PREDICTS. A loud floor is a RISK INDICATOR, not a
+# forecast: part_6 and part_8 sit at the very top of the scale and still
+# scored 94-95%, while room2_part_1 at a near-identical floor scored 84.7%.
+# So loud means "this is the regime where results get variable (85-95%)
+# instead of consistent (95-99%)", NOT "it is about to fail". Grouped, the
+# effect is real: LOSO within the loud sessions is 87.8% vs 94.1% in quiet.
+#
+# (Footnote for anyone re-deriving these: against SEPARATION alone the raw
+# measure correlates marginally better, -0.85 vs -0.81, because all ten
+# sessions came off boards of similar signal strength so the division adds a
+# little variance without adding information. Across DIFFERENT boards the raw
+# measure is simply wrong, as the node A/B table above shows, and the relative
+# one also fixes a real misgrade: room2_part_2 was called 'loud' on the raw
+# scale despite scoring 98.4%, and grades correctly as 'moderate' here.)
+NOISE_REL_QUIET = 0.06   # at or below: matches the project's most reliable sessions
+NOISE_REL_LOUD = 0.15    # at or above: matches its most variable ones
+
+
+def baseline_noise_stats(baseline):
+    """Pull the noise-floor numbers out of a calibration baseline.
+
+    Returns (absolute, relative, amp_scale). `amp_scale` averages only the
+    ACTIVE subcarriers - the ~20 structurally dead guard-band ones sit at
+    exactly zero and would otherwise drag the scale down and inflate the
+    ratio."""
+    amp = np.asarray(baseline["amp_mean"], dtype=float)
+    active = amp[amp > 0]
+    scale = float(active.mean()) if active.size else 0.0
+    absolute = float(baseline["energy_mean"])
+    relative = absolute / scale if scale > 0 else float("nan")
+    return absolute, relative, scale
+
+
+def assess_noise_floor(relative):
+    """Grade an empty-room noise floor given the RELATIVE (scale-free) value
+    from baseline_noise_stats(). Returns (level, headline, detail) where level
+    is 'quiet' | 'moderate' | 'loud'."""
+    if not np.isfinite(relative):
+        return ("quiet", "Noise floor unavailable",
+                "No amplitude scale to compare against yet.")
+    if relative <= NOISE_REL_QUIET:
+        return ("quiet",
+                f"Quiet environment (noise {relative:.3f})",
+                "Matches this project's most reliable recording sessions, "
+                "which scored 95-99% held out.")
+    if relative < NOISE_REL_LOUD:
+        return ("moderate",
+                f"Moderately noisy environment (noise {relative:.3f})",
+                "Above the quiet sessions but the classes still separate well. "
+                "Detection should work normally.")
+    return ("loud",
+            f"Noisy environment (noise {relative:.3f})",
+            "An empty room here is nearly as disturbed as an occupied one, so "
+            "the aggregate motion signal is weak and detection leans on finer "
+            "per-subcarrier structure. Sessions recorded in this regime scored "
+            "between 85% and 95% held out, versus 95-99% in quiet rooms - "
+            "results get more variable, with false 'MOVING' readings the more "
+            "likely error. It does not mean detection will fail. Common "
+            "causes: Wi-Fi congestion on this channel, a fan or AC running, or "
+            "something physically moving in the room during calibration.")
 
 
 def calibrate_features(stats, baseline):

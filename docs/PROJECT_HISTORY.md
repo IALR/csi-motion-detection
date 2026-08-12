@@ -536,20 +536,24 @@ is the real test of whether bug 2 in particular is fully resolved (see §18).
   single-room sessions (`part_1_data`..`part_8_data`) plus two second-room
   sessions (`room2_part_1_data`, `room2_part_2_data`, see §21) — 0.75s
   windows, per-block + rolling calibration, 266 features (260
-  index-specific + 6 order-invariant). **95.07% LOSO accuracy.** Saved to
-  `csi_model.joblib`. Reproducible via `python train_model.py --sessions
-  part_1_data part_2_data part_3_data part_4_data part_5_data part_6_data
-  part_7_data part_8_data room2_part_1_data room2_part_2_data
-  --window-seconds 0.75` — note the script's CLI defaults are only the
-  first 4 sessions at a 2.0s window (a leftover from early development, see
-  §21), so always pass the full session list and `--window-seconds 0.75`
-  explicitly; running the script bare will silently retrain and overwrite
-  `csi_model.joblib` with a much weaker, wrong-config model.
+  index-specific + 6 order-invariant). **94.25% LOSO accuracy** (per-window
+  / weighted; the unweighted mean of folds is 95.07%, which is what this
+  document quoted before §23 corrected it). Saved to
+  `csi_model.joblib`. Reproducible with a bare `python train_model.py` —
+  as of §22 the script's defaults ARE the deployed config. (They were
+  previously the first 4 sessions at a 2.0s window, a leftover from early
+  development: running the script with no arguments silently retrained on
+  less than half the data at the wrong window size and overwrote the
+  deployed model with a much weaker one. Fixed rather than documented.)
+- **Tests**: `python -m pytest tests/` — 25 tests covering the live-system
+  failure modes (§22). Run them after any change to `csi_common.py` or
+  `csi_live_server.py`.
 - **Validated single-room performance**: strong and repeatedly confirmed via
   LOSO, true held-out-session tests, and cross-algorithm comparison.
 - **Cross-room performance**: tested for the first time (§21). A held-out
   second room scored 82.5% when trained only on room 1; folding two room-2
-  sessions into training brought overall LOSO to 95.07% with room2_part_2
+  sessions into training brought overall LOSO to 94.25% weighted (95.07%
+  unweighted, the figure §21 was written against) with room2_part_2
   as its own held-out fold scoring 98.44%. Real evidence it generalizes
   across rooms, though still only two rooms total — not yet the "genuinely
   unproven" state this section used to describe, but not exhaustively
@@ -909,6 +913,274 @@ identical multipath geometry and won't demonstrate the coverage benefit),
 dashboard showing both node tiles live and correctly combining via OR. The
 user confirmed this measurably improves room coverage over the single-node
 setup — the off-axis blind spot (§16) is no longer a fully open problem.
+
+---
+
+## 22. Robustness audit — failure modes, and the first test suite
+
+**Why asked:** the user asked for a full review of everything built so far
+and what still needed improving, after declaring the project essentially
+complete.
+
+The finding worth recording up front: **the model was fine; every real
+problem was a failure-mode problem.** The system behaved correctly when all
+hardware was healthy, and badly — sometimes silently — when it wasn't. All
+four bugs below were found by reading the code, and each was verified by
+actually reproducing it before the fix.
+
+**Bug 1 — a dead node permanently blocked EMPTY.** `compute_combined()`
+treated a node that had never reported (`None`) as "unknown," and its
+`all(v == "EMPTY")` test could therefore never pass. So if node B's port
+failed to open — wrong COM port, board unplugged, or the IDF monitor still
+holding the port, *the single most common recurring confusion in this
+project* — node A worked perfectly, the room correctly showed MOVING, and
+then could **never return to EMPTY**. The dashboard sat on "warming up"
+indefinitely and looked broken. Fixed by introducing an explicit `OFFLINE`
+state that is excluded from the vote: a node that isn't reporting doesn't
+get a veto over the nodes that are. Two triggers set it — a serial port
+that fails to open, and `NODE_STALE_SECONDS` (20s) with no frames. If
+*every* node is offline the result is `None`, never EMPTY: an empty room
+must never be inferred from the absence of working sensors.
+
+**Bug 2 — serial read errors were a tight busy-loop.** The read-error
+handler printed and immediately `continue`d, with no sleep and no
+reconnect. Unplugging a board (or a brown-out) turned that into a spin
+pinning a core and flooding the console. Fixed by wrapping the reader in a
+reconnect loop with a `RECONNECT_SECONDS` backoff, so an unplugged board
+degrades to "that node comes back when you plug it in." This is squarely
+the unattended-soak-test case (§18 item 3) that had never been exercised.
+
+**Bug 3 — a mid-session subcarrier change killed a node silently.**
+`n_subcarriers` was latched from the first frame; if the AP renegotiated
+its channel width later (20MHz/128 ↔ 40MHz/192), every subsequent frame
+failed the length check and was dropped **forever**, with no warning. The
+*startup* case had been handled well in §21; the mid-session case had not.
+Fixed with a `SUBCARRIER_RELATCH_FRAMES` (20) threshold: isolated
+wrong-length frames are still discarded as line corruption, but a sustained
+change re-latches the count and restarts calibration. Verified that a node
+now survives a change to a new count *and* recovers when the AP switches
+back.
+
+**Bug 4 — `parse_line` ignored the count the firmware already sends.** The
+firmware emits `CSI_AMP,<ts>,<label>,<num_subcarriers>,<rssi>,...`, but the
+parser never checked field 3 against how many amplitudes actually arrived.
+A line mangled in transit (dropped UART bytes, or
+`decode(errors="ignore")` swallowing a chunk) can still contain the marker
+and still split into enough fields to look valid — just short. That
+silently became a short amplitude array, and because the live tools latch
+their subcarrier count from the first frame, one mangled first line would
+mis-size an entire session. One-line fix using data already on the wire.
+Checked that the firmware's own 2048-byte line buffer can't legitimately
+truncate (a 192-subcarrier frame needs ~800 bytes), so rejecting a
+truncated line is always correct.
+
+**Frontend honesty fixes.** Three follow-ons, all the same category —
+the UI must not claim more than it knows:
+- An OFFLINE node rendered as "warming up…", implying it was about to come
+  back. Now shows "offline — not counted" with a red dot.
+- `describeCombined()` said "confirmed empty by all 2 nodes" even when one
+  was dead. Now reports the live count and appends "(1 offline)" —
+  overstating coverage is the one thing a sensor readout must never do.
+- Warning banners never cleared once a condition resolved; the server now
+  sends an empty message to clear, and the client honours it.
+
+**`train_model.py` defaults fixed, not documented.** The previous session
+found that a bare `python train_model.py` silently retrained on 4 sessions
+at a 2.0s window and overwrote the deployed model — and responded by adding
+a warning to three separate doc files. That was the wrong call: the
+defaults are now simply the deployed config (`DEFAULT_SESSIONS`,
+`DEFAULT_WINDOW_SECONDS`), verified by running the script bare and getting
+95.07% back. Documenting a footgun is not the same as removing it.
+
+**`tests/test_pipeline.py` — the project's first tests** (25, all passing,
+`python -m pytest tests/`). This addresses the gap that the stated #1
+architectural risk — offline and online math silently diverging — had no
+test asserting it didn't. Coverage: `parse_line` malformed-input rejection;
+`compute_combined` across all node-state combinations including OFFLINE;
+the `compute_baseline` dead-subcarrier std floor (§9's blowup);
+`PredictionSmoother` hysteresis; the `RollingCalibrator` floor that
+prevents the §15 sensitivity ratchet; and four integration tests that drive
+the **real** `pump()` coroutine with synthetic frames and a stub model that
+enforces the same feature-count contract sklearn does — so a test can't
+pass by accidentally letting a mismatched window through.
+
+**Also**: `requirements.txt` was fully unpinned despite this project having
+already been bitten by an unpinned dependency (reportlab moving
+`TableOfContents` between releases, §21). Now has minimum versions with the
+reasoning recorded in the file.
+
+**Still open after this audit**, deliberately not fixed: the frame queue
+between the serial thread and `pump()` is unbounded, so a backlog becomes
+growing latency rather than dropped frames (minor at 10Hz, worth revisiting
+if a soak test shows drift); and `csi_label_collector.py` /
+`csi_live_monitor.py` each carry their own private copy of `parse_line`,
+which is a real violation of the single-source-of-truth rule in CLAUDE.md —
+they predate `csi_common.py` and have slightly different needs, but should
+eventually be folded in.
+
+---
+
+## 23. "The model is not stable" — diagnosing it, and what it actually was
+
+**Why asked:** the user reported the model felt unstable in live use and
+asked for training to be re-run and checked for issues.
+
+**It was not the model.** Three things were ruled out with measurements
+before anything was changed:
+
+1. **Not randomness.** Retrained across 5 random seeds (0, 1, 7, 42, 123):
+   overall accuracy 0.9364-0.9425, std 0.0022. Training is essentially
+   deterministic. `room2_part_1_data` was the worst fold under *every* seed.
+2. **Not the features.** Six ablations were run (drop motion_energy, drop
+   per-index features, order-invariant only, etc). **The hypothesis that
+   motion_energy was destabilising things was wrong** — removing it made
+   results *worse* (weighted 0.9425 → 0.9400, worst fold 0.8467 → 0.8300).
+   No variant beat the current 266-feature set. Recorded here because it
+   was a confident, plausible hypothesis that the data refuted.
+3. **Not one bad session that poisons training.** Dropping
+   `room2_part_1_data` raises the rest to 0.9608 — but training *with* it
+   costs nothing overall (see below), so it earns its place.
+
+**What it actually is: the empty-room RF noise floor swings 7× between
+sessions.** Mean frame-to-frame amplitude change while the room was
+genuinely empty:
+
+| session | empty | moving | ratio | |
+|---|---|---|---|---|
+| part_1 | 0.83 | 3.85 | 4.66× | |
+| part_2 | 1.02 | 3.18 | 3.13× | |
+| part_3 | 1.16 | 3.34 | 2.88× | |
+| part_4 | 0.85 | 3.22 | 3.80× | |
+| part_5 | 0.81 | 4.81 | 5.95× | |
+| part_6 | **5.87** | 5.99 | **1.02×** | no separation |
+| part_7 | 3.06 | 4.16 | 1.36× | weak |
+| part_8 | **5.89** | 5.82 | **0.99×** | no separation |
+| room2_part_1 | **5.06** | 5.14 | **1.02×** | no separation |
+| room2_part_2 | 3.51 | 6.64 | 1.89× | |
+
+The *moving* signal is roughly constant everywhere (3.2-6.6). It is the
+**empty** floor that explodes. Where it does, an empty room is already as
+disturbed as an occupied one, the aggregate motion-energy feature carries
+no information at all, and only finer per-subcarrier structure still
+separates the classes. The elevated noise is **broadband** — the top 5
+subcarriers carry only ~11% of it — so it is interference or real room
+disturbance, not a broken subcarrier.
+
+Measured cost, grouping the sessions by regime: LOSO within the quiet
+sessions 94.1%, within the loud ones 87.8%. Train on quiet, test on loud:
+89.9% with 11.2% false alarms. Train on loud, test on quiet: 96.2% with
+2.7%. **That asymmetry is why the loud sessions were kept** — training on
+all 10 (94.25%) is no worse than training on the 6 quiet ones (94.13%), and
+the harder data generalises better than the easy data does.
+
+**The worst single finding**: inside `room2_part_1_data`, the third quarter
+scores **48.7% — worse than chance — with 78.7% false alarms**, while the
+other three quarters score 95.3%, 94.7% and 100%. Its third empty block has
+*higher* motion energy than the moving block that follows it. This is the
+same contaminated-block signature as the discarded session-4 attempts (§4):
+something was disturbing that room while it was labelled empty.
+
+**Be careful how much this predicts.** The noise floor correlates with
+held-out accuracy at only **-0.50**, and the two *loudest* sessions scored
+fine (part_6 5.87 → 94.3%, part_8 5.89 → 95.0%) while room2_part_1 at a
+*lower* floor of 5.06 scored 84.7%. A loud floor means "expect the variable
+regime (85-95%) rather than the consistent one (95-99%)", **not** "this will
+fail". The warning text in `assess_noise_floor()` was rewritten to say
+exactly that after the first draft overclaimed a "~90%, 11% false alarms"
+figure that actually came from the train-quiet/test-loud experiment, which
+is not what the deployed model does.
+
+**What was changed as a result:**
+- `assess_noise_floor()` added to `csi_common.py` (single source of truth),
+  with thresholds read off the table above rather than chosen by feel.
+- The live server grades the floor at startup calibration *and* at every
+  rolling recalibration, ships it in the `calibrated`/`recalibrated`
+  messages, and raises a warning banner in the loud regime. The system was
+  already computing this number during calibration and discarding it — a
+  bad environment simply looked like a flaky model.
+- The dashboard shows a "Noise floor" tile per node, colour-coded with a
+  word (never colour alone), plus the full explanation on hover.
+- `train_model.py` prints each session's floor and empty/moving separation
+  at load time, flagging any session where the classes barely differ — the
+  first piece of the long-proposed `validate_session.py` (§18 item 4).
+
+**Reported accuracy corrected.** `train_model.py` was reporting the
+*unweighted* mean of per-fold accuracies (95.07%). That treats a 150-window
+session as equal to a 600-window one, which flatters the result precisely
+when the hardest session is also the biggest — the case here
+(`room2_part_1_data` is the worst fold *and* 18% of all windows). The
+headline is now the **weighted, per-window out-of-fold accuracy: 94.25%**,
+with the unweighted figure still printed beside it and labelled. README,
+CLAUDE.md and §16 updated to match.
+
+**Also found**: `part_3_data` ends with a truncated 43-frame empty block, so
+that block's baseline is built from 43 frames instead of the intended 100.
+Minor (~5 windows affected) and left as-is, but it is the source of the
+`WARNING: only 43 frames available` line that prints on every training run.
+
+---
+
+## 24. The noise floor had to become scale-free (a defect in §23's own fix)
+
+**Why found:** §23 shipped a noise-floor readout. Using it on two real boards
+immediately produced a contradiction, which is exactly what a readout is for.
+
+`diagnose_nodes.py` (new in this section — a hardware-level side-by-side node
+comparison, since "why is one board noisier" is a link question that the
+model pipeline can't answer) measured both ESP32s **at the same spot**:
+
+```
+            RSSI      amplitude    raw jitter    relative
+node A     -47.0        32.09         1.63         0.051
+node B     -59.3        16.59         1.17         0.071
+```
+
+Node B reads a **lower** raw noise floor than node A — while receiving 12dB
+less signal and being 39% noisier relative to what it receives. The metric
+had it exactly backwards.
+
+**Cause**: the raw measure is mean frame-to-frame amplitude *change*. A board
+receiving a weaker signal has proportionally smaller amplitudes, so its
+absolute differences shrink too. Dividing by mean amplitude (over ACTIVE
+subcarriers only — the ~20 dead guard-band ones sit at zero and would deflate
+the scale) makes it scale-free and comparable between nodes.
+
+**Rethresholded against the same 10 sessions** — and the relative measure
+turned out to grade *better*, not just more fairly: `room2_part_2` was graded
+"loud" on the raw scale despite scoring **98.4%**, and is correctly "moderate"
+at 0.1374. New thresholds: quiet ≤ 0.06, loud ≥ 0.15.
+
+| session | relative | sep | held-out |
+|---|---|---|---|
+| part_1 | 0.0248 | 4.67× | 96.0% |
+| part_4 | 0.0258 | 3.80× | 95.7% |
+| part_2 | 0.0312 | 3.13× | 98.7% |
+| part_3 | 0.0357 | 2.88× | 98.7% |
+| part_5 | 0.0445 | 5.96× | 95.3% |
+| part_7 | 0.0995 | 1.36× | 94.0% |
+| room2_part_2 | 0.1374 | 1.89× | 98.4% |
+| part_8 | 0.2162 | 0.99× | 95.0% |
+| part_6 | 0.2207 | 1.02× | 94.3% |
+| room2_part_1 | 0.2208 | 1.02× | 84.7% |
+
+**Honest footnote kept in the code**: against *separation alone* the raw
+measure correlates marginally better (-0.85 vs -0.81), because all ten
+sessions came off boards of similar signal strength, so the division adds a
+little variance without adding information. Across *different boards* the raw
+measure is simply wrong, which is the case that matters for a two-node system.
+
+**Also added**: the dashboard now calls out a reception disparity between
+nodes separately from noise (`compareNodeSignals()`), because "one board
+receives 48% less signal" needs a different fix — antenna, placement — from
+"the room is noisy", and that distinction is invisible in the noise number
+alone. `train_model.py` reports the relative figure per session too, so
+offline and live grade identically.
+
+**Still unresolved at the time of writing**: node B's 12dB deficit itself.
+The recommended test is to swap the two boards' positions and re-measure — if
+the deficit follows the BOARD it is hardware (a u.FL/IPEX selector set to
+external with no antenna attached is the classic cause), if it stays with the
+SPOT it is placement. Not yet done.
 
 ---
 

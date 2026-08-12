@@ -9,11 +9,21 @@ This file is just a fast-start summary.
 ## Current state
 - Model: Random Forest, 10 sessions (8 room-1 `part_1_data`..`part_8_data`
   + 2 room-2 `room2_part_1_data`/`room2_part_2_data`), 0.75s windows,
-  **95.07% leave-one-session-out accuracy**. Deployed as `csi_model.joblib`.
-  **Retrain with the full session list and `--window-seconds 0.75`
-  explicitly** — `train_model.py`'s bare CLI defaults are only 4 sessions
-  at a 2.0s window and will silently overwrite the deployed model with a
-  much weaker one (see PROJECT_HISTORY.md §16 for the exact command).
+  **94.25% leave-one-session-out accuracy** (per-window/weighted; the
+  unweighted mean of folds is 95.07% and was the figure quoted before §23).
+  Deployed as `csi_model.joblib`. A bare `python train_model.py` reproduces
+  exactly that — its defaults are the deployed config (they used to be 4
+  sessions at 2.0s, which silently degraded the model; fixed, §22).
+- **Accuracy is environment-dependent, and this is the main open weakness**:
+  the empty-room RF noise floor varies 7× across sessions; quiet rooms score
+  95-99%, noisy ones 85-95% (§23). `assess_noise_floor()` in `csi_common.py`
+  grades it and the live system reports it. Don't treat a single accuracy
+  number as the system's behaviour — ask which regime it was measured in.
+- **Tests: `python -m pytest tests/`** (25 tests, all passing). They pin the
+  live-system failure modes — malformed serial lines, a node going offline,
+  the AP changing channel width mid-run — because every bug this project
+  has hit twice was a failure-mode bug, not a math bug. Run them after
+  touching `csi_common.py` or `csi_live_server.py`.
 - Live system now supports **1 or 2 ESP32 nodes** (`--port-b` on
   `csi_live_server.py`), OR-combined, dashboard-visible per node. Matplotlib
   `csi_live_predict.py` remains single-node. Includes per-block + rolling

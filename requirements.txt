@@ -1,8 +1,20 @@
-pyserial
-numpy
-pandas
-scikit-learn
-joblib
-websockets
-matplotlib
-reportlab
+# Minimum versions are pinned to what this project is actually developed and
+# verified against. They were previously unpinned, which already caused one
+# real breakage: reportlab moved TableOfContents between releases, and the
+# import in full_model_report.py failed on a version that "should" have worked.
+# A trained csi_model.joblib is also only guaranteed to load under the
+# scikit-learn major version it was pickled with - if you retrain, retrain
+# with the version below.
+
+pyserial>=3.5
+numpy>=2.0
+pandas>=2.0
+scikit-learn>=1.5
+joblib>=1.4
+websockets>=12.0
+matplotlib>=3.8
+reportlab>=4.0
+
+# --- Tests only (python -m pytest tests/) ---
+pytest>=8.0
+pytest-asyncio>=0.23

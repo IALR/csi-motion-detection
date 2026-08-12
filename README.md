@@ -8,9 +8,11 @@ computes internally to decode data) captures that disturbance as a side
 effect.
 
 **Current state**: Random Forest classifier, 10 labeled recording sessions
-across 2 rooms, **95.07% leave-one-session-out accuracy**, with a live
+across 2 rooms, **94.25% leave-one-session-out accuracy**, with a live
 desktop tool and a browser dashboard supporting one or two ESP32 nodes
-(combined via OR logic) for real-time monitoring.
+(combined via OR logic) for real-time monitoring. Accuracy depends strongly
+on the room's RF noise floor — 95-99% in quiet rooms, 85-95% in noisy ones —
+and the dashboard now measures and reports which regime you're in.
 
 ---
 
@@ -48,7 +50,9 @@ flowchart TD
 
 | Check | Result |
 |---|---|
-| Leave-one-session-out accuracy (10 sessions, 2 rooms) | **95.07%** |
+| Leave-one-session-out accuracy (10 sessions, 2 rooms), per-window | **94.25%** |
+| …unweighted mean of the 10 folds (the figure previously quoted) | 95.07% |
+| Spread across sessions | std 3.9pp, best 98.7%, worst 84.7% |
 | Best of 6 compared model families (RF, Gradient Boosting, Logistic Regression, SVM×2, KNN) | Random Forest wins outright, lowest variance too |
 | True held-out session tests (trained on all others, scored once on a session never touched) | 91-99% across 4 independently tested sessions |
 | Cross-room held-out test (trained on room 1 only, scored on an untouched room 2 session) | 82.5% |
@@ -104,6 +108,8 @@ evaluate_holdout.py         True held-out evaluation on a named session
 analyze_model.py            Dumps fold accuracy / feature importance / etc. as JSON
 compare_models.py           Compares 6 ML model families under identical validation
 full_model_report.py        Generic LOSO evaluation report generator (16 metrics, ~20 figures, PDF)
+diagnose_nodes.py           Hardware diagnosis: compares two nodes' signal strength and
+                             noise floor to separate a noisy room from a bad board/antenna
 
 csi_live_predict.py         Matplotlib desktop live inference tool
 csi_live_server.py          WebSocket backend for the browser dashboard, supports 1 or 2 ESP32 nodes (--port-b)
@@ -150,8 +156,17 @@ Leave the room when it counts down, press `m` when you're back and ready to move
 ### 4. Train
 
 ```
-python train_model.py --sessions part_1_data part_2_data ... my_session_data
+python train_model.py                                    # reproduces the deployed model
+python train_model.py --sessions part_1_data ... my_session_data --window-seconds 0.75
 ```
+
+### 4b. Run the tests
+
+```
+python -m pytest tests/
+```
+25 tests covering parsing, calibration, prediction smoothing, and the live
+system's failure modes (node offline, AP channel-width change mid-run).
 
 ### 5. Run it live
 
@@ -184,7 +199,7 @@ monitor or the collector before running a live inference tool.
 ## Known limitations
 
 - **Only 2 rooms tested.** Cross-room generalization has been tested once
-  (82.5% held out, 95.07% after folding both room-2 sessions into
+  (82.5% held out, 94.25% after folding both room-2 sessions into
   training) — real evidence it transfers, but only across 2 rooms so far. A
   third, different room is the natural next test — see
   `docs/PROJECT_HISTORY.md` for the current status.
@@ -195,6 +210,15 @@ monitor or the collector before running a live inference tool.
   separated nodes (see `--port-b` below), combined via OR logic, covers
   each other's blind spots and has been confirmed live to improve coverage;
   each individual node still has its own.
+- **Accuracy depends on the room's RF noise floor.** In this project's own
+  recordings the empty-room noise floor varied ~9× between sessions (0.025 to
+  0.221, measured as jitter relative to received signal). Where it is high,
+  an empty room is nearly as disturbed as an occupied one and results get
+  variable (85-95% held out, versus 95-99% in quiet rooms), with false
+  "MOVING" readings the likelier error. The system measures this during
+  calibration and reports it on the dashboard rather than degrading silently
+  — see `assess_noise_floor()` in `csi_common.py`. Use `diagnose_nodes.py` to
+  tell a noisy *room* apart from a badly-*receiving* board.
 - **One person, one movement style.** All training data so far is one
   person's walking. Not yet tested against a different person or movement
   type — the single biggest remaining generalization gap.

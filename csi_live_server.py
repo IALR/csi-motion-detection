@@ -52,62 +52,95 @@ except ImportError:
     sys.exit(1)
 
 from csi_common import (CALIB_SECONDS_DEFAULT, LABEL_NAMES, PredictionSmoother,
-                         RollingCalibrator, compute_baseline, make_features, parse_line)
+                         RollingCalibrator, assess_noise_floor, baseline_noise_stats,
+                         compute_baseline, make_features, parse_line)
+
+
+RECONNECT_SECONDS = 3.0   # wait between attempts to (re)open a serial port
 
 
 def serial_reader_thread(port, baud, out_queue, stop_event, node_id):
-    try:
-        ser = serial.Serial(port, baud, timeout=0.1)
-    except serial.SerialException as e:
-        print(f"[serial:{node_id}] Could not open {port}: {e}", flush=True)
-        out_queue.put({"type": "error", "node": node_id, "message": f"Could not open {port}: {e}"})
-        return
-    print(f"[serial:{node_id}] {port} opened @ {baud}. Waiting for data "
-          f"(ESP32 usually resets on port-open, so this can take ~10-15s: "
-          f"boot + Wi-Fi connect + the firmware's built-in delay before CSI starts)...",
-          flush=True)
-    ser.reset_input_buffer()
-    buf = ""
-    total_bytes = 0
-    total_lines = 0
-    parsed_lines = 0
-    last_report = time.monotonic()
-    try:
-        while not stop_event.is_set():
-            try:
-                n = ser.in_waiting
-                data = ser.read(n if n else 1)
-            except Exception as e:
-                print(f"[serial:{node_id}] read error: {e}", flush=True)
-                continue
-            if data:
-                total_bytes += len(data)
-                buf += data.decode("utf-8", errors="ignore")
-            if "\n" in buf:
-                *lines, buf = buf.split("\n")
-                for ln in lines:
-                    total_lines += 1
-                    r = parse_line(ln)
-                    if r is not None:
-                        parsed_lines += 1
-                        out_queue.put({"type": "frame", "rssi": r[0], "amps": r[1]})
-                    elif total_lines <= 5 or parsed_lines == 0:
-                        # Show what the device IS sending (boot logs, Wi-Fi
-                        # status, etc.) until we've seen at least one good frame.
-                        print(f"[serial:{node_id}] non-CSI line: {ln.strip()[:120]}", flush=True)
+    """Owns one node's serial port for the life of the process.
 
-            now = time.monotonic()
-            if now - last_report > 3:
-                last_report = now
-                print(f"[serial:{node_id}] {total_bytes} bytes, {total_lines} lines, "
-                      f"{parsed_lines} parsed as CSI so far", flush=True)
-                if total_bytes == 0:
-                    print(f"[serial:{node_id}] Zero bytes received - wrong COM port, "
-                          "device not powered, or nothing else transmitting.", flush=True)
+    Wrapped in a reconnect loop: a board that is unplugged, browns out, or
+    resets mid-run makes every subsequent read raise, and an earlier version
+    caught that exception and immediately `continue`d - a tight busy-loop
+    that pinned a core and flooded the console with the same error thousands
+    of times a second. Now a failed open or a failed read backs off for
+    RECONNECT_SECONDS and retries the port, so unplugging a board degrades
+    to "that node reconnects when you plug it back in" instead of taking the
+    machine down. This matters most for exactly the unattended long-run case
+    the single-node version was never tested under."""
+    announced_open = False
+    while not stop_event.is_set():
+        try:
+            ser = serial.Serial(port, baud, timeout=0.1)
+        except serial.SerialException as e:
+            if not announced_open:
+                # Only report the first failure of a streak, otherwise a port
+                # that is simply absent would emit a message every 3s forever.
+                print(f"[serial:{node_id}] Could not open {port}: {e} "
+                      f"(retrying every {RECONNECT_SECONDS:.0f}s)", flush=True)
+                out_queue.put({"type": "error", "node": node_id,
+                               "message": f"Could not open {port}: {e}"})
+                announced_open = True
+            stop_event.wait(RECONNECT_SECONDS)
+            continue
+
+        announced_open = False
+        print(f"[serial:{node_id}] {port} opened @ {baud}. Waiting for data "
+              f"(ESP32 usually resets on port-open, so this can take ~10-15s: "
+              f"boot + Wi-Fi connect + the firmware's built-in delay before CSI starts)...",
+              flush=True)
+        ser.reset_input_buffer()
+        buf = ""
+        total_bytes = 0
+        total_lines = 0
+        parsed_lines = 0
+        last_report = time.monotonic()
+        try:
+            while not stop_event.is_set():
+                try:
+                    n = ser.in_waiting
+                    data = ser.read(n if n else 1)
+                except Exception as e:
+                    print(f"[serial:{node_id}] read error: {e} - reconnecting in "
+                          f"{RECONNECT_SECONDS:.0f}s", flush=True)
                     out_queue.put({"type": "warning", "node": node_id,
-                        "message": "No serial data received at all - check the port/device."})
-    finally:
-        ser.close()
+                        "message": f"Lost the serial connection ({e}). Reconnecting..."})
+                    break  # drop out to the reconnect loop, don't spin here
+                if data:
+                    total_bytes += len(data)
+                    buf += data.decode("utf-8", errors="ignore")
+                if "\n" in buf:
+                    *lines, buf = buf.split("\n")
+                    for ln in lines:
+                        total_lines += 1
+                        r = parse_line(ln)
+                        if r is not None:
+                            parsed_lines += 1
+                            out_queue.put({"type": "frame", "rssi": r[0], "amps": r[1]})
+                        elif total_lines <= 5 or parsed_lines == 0:
+                            # Show what the device IS sending (boot logs, Wi-Fi
+                            # status, etc.) until we've seen at least one good frame.
+                            print(f"[serial:{node_id}] non-CSI line: {ln.strip()[:120]}", flush=True)
+
+                now = time.monotonic()
+                if now - last_report > 3:
+                    last_report = now
+                    print(f"[serial:{node_id}] {total_bytes} bytes, {total_lines} lines, "
+                          f"{parsed_lines} parsed as CSI so far", flush=True)
+                    if total_bytes == 0:
+                        print(f"[serial:{node_id}] Zero bytes received - wrong COM port, "
+                              "device not powered, or nothing else transmitting.", flush=True)
+                        out_queue.put({"type": "warning", "node": node_id,
+                            "message": "No serial data received at all - check the port/device."})
+        finally:
+            try:
+                ser.close()
+            except Exception:
+                pass
+        stop_event.wait(RECONNECT_SECONDS)
 
 
 async def broadcast(clients, msg, last_status=None):
@@ -133,13 +166,31 @@ async def broadcast(clients, msg, last_status=None):
         clients.discard(ws)
 
 
+OFFLINE = "OFFLINE"       # a node that has failed or gone silent
+NODE_STALE_SECONDS = 20.0  # no frames for this long -> treat the node as offline
+SUBCARRIER_RELATCH_FRAMES = 20  # sustained wrong-length frames before re-latching
+
+
 def compute_combined(combined_state):
     """OR logic: any node confirming MOVING is immediate MOVING (don't wait
     for a still-calibrating second node to catch what the first already
-    caught). Only reports EMPTY once every configured node has confirmed
+    caught). Only reports EMPTY once every participating node has confirmed
     something and none of them is MOVING. None means "still warming up" -
-    genuinely unknown yet, not "probably empty"."""
-    values = list(combined_state.values())
+    genuinely unknown yet, not "probably empty".
+
+    OFFLINE nodes are excluded from the vote entirely. Without that, a node
+    that never came up (wrong COM port, board unplugged, or - the common one
+    in this project - the IDF monitor still holding the port) sits at None
+    forever, and since None is not "EMPTY", the `all(...)` test below can
+    never pass: the room would show MOVING correctly but could NEVER return
+    to EMPTY, leaving the dashboard stuck on "warming up" while the healthy
+    node worked perfectly. A node that isn't reporting must not get a vote;
+    it must not silently veto the nodes that are.
+
+    If EVERY node is offline the result is None, not EMPTY - no data means
+    unknown, and an empty room must never be *inferred* from the absence of
+    working sensors."""
+    values = [v for v in combined_state.values() if v != OFFLINE]
     if "MOVING" in values:
         return "MOVING"
     if values and all(v == "EMPTY" for v in values):
@@ -168,6 +219,9 @@ async def pump(out_queue, clients, model_bundle, last_status, control, node_id,
     n_subcarriers = None
     active_idx = None
     warned_mismatch = False
+    wrong_length_streak = 0
+    last_frame_at = None
+    marked_offline = False
 
     async def broadcast_combined_if_changed():
         overall = compute_combined(combined_state)
@@ -175,6 +229,25 @@ async def pump(out_queue, clients, model_bundle, last_status, control, node_id,
             last_combined_broadcast[0] = overall
             await broadcast(clients, {"type": "combined", "prediction": overall,
                                        "nodes": dict(combined_state)}, last_status)
+
+    async def set_offline(reason):
+        """Take this node out of the combined vote (see compute_combined)."""
+        nonlocal marked_offline
+        if marked_offline:
+            return
+        marked_offline = True
+        combined_state[node_id] = OFFLINE
+        await broadcast_combined_if_changed()
+        print(f"[predict:{node_id}] Marked OFFLINE: {reason}", flush=True)
+
+    async def clear_offline():
+        nonlocal marked_offline
+        if not marked_offline:
+            return
+        marked_offline = False
+        combined_state[node_id] = None  # back to "warming up", not to a stale label
+        await broadcast_combined_if_changed()
+        print(f"[predict:{node_id}] Back online - recalibrating.", flush=True)
 
     while True:
         if control.get("recalibrate"):
@@ -186,20 +259,49 @@ async def pump(out_queue, clients, model_bundle, last_status, control, node_id,
             smoother.reset()
             roller.reset()
             combined_state[node_id] = None
+            marked_offline = False
             await broadcast_combined_if_changed()
             print(f"[predict:{node_id}] Forced recalibration requested - restarting calibration phase.", flush=True)
 
         try:
             item = out_queue.get_nowait()
         except queue.Empty:
+            # A node that has stopped producing frames (board unplugged, reset,
+            # Wi-Fi dropped so the ping trigger stopped) must stop voting, or
+            # its last known state would freeze into the combined result
+            # forever. This branch runs continuously even with no data, so it
+            # is where staleness gets noticed.
+            if (last_frame_at is not None and not marked_offline
+                    and time.monotonic() - last_frame_at > NODE_STALE_SECONDS):
+                await set_offline(f"no frames for {NODE_STALE_SECONDS:.0f}s")
+                await broadcast(clients, {"type": "warning", "node": node_id,
+                    "message": f"No data for {NODE_STALE_SECONDS:.0f}s - this node is "
+                               f"no longer counted until it starts streaming again."},
+                    last_status)
             await asyncio.sleep(0.01)
             continue
 
         if item["type"] in ("error", "warning"):
             await broadcast(clients, {**item, "node": node_id}, last_status)
+            if item["type"] == "error":
+                # Port never opened: this node cannot vote at all.
+                await set_offline(item.get("message", "serial error"))
             continue
 
         rssi, amps = item["rssi"], item["amps"]
+        last_frame_at = time.monotonic()
+        if marked_offline:
+            # Data is flowing again after a reconnect. Everything downstream
+            # (baseline, window, smoother) refers to a stream that has since
+            # been interrupted, so start this node over from calibration
+            # rather than resuming against a stale baseline.
+            baseline = None
+            calib_amp_buf, calib_rssi_buf = [], []
+            amp_buf.clear()
+            rssi_buf.clear()
+            smoother.reset()
+            roller.reset()
+            await clear_offline()
 
         if n_subcarriers is None:
             n_subcarriers = len(amps)
@@ -210,8 +312,43 @@ async def pump(out_queue, clients, model_bundle, last_status, control, node_id,
                                        "n_subcarriers": int(n_subcarriers),
                                        "n_active": int(len(active_idx))}, last_status)
         if len(amps) != n_subcarriers:
-            continue
+            # One-off wrong-length frames are line corruption - drop them. But
+            # a SUSTAINED change is the AP genuinely renegotiating its channel
+            # width mid-session (20MHz/128 <-> 40MHz/192), and the count latched
+            # from the first frame is now simply wrong. Previously every frame
+            # after such a switch failed this check and was dropped forever:
+            # the node went permanently, silently dead with no warning at all.
+            # Re-latch instead, and restart calibration since the whole feature
+            # layout just changed underneath us.
+            wrong_length_streak += 1
+            if wrong_length_streak < SUBCARRIER_RELATCH_FRAMES:
+                continue
+            print(f"[predict:{node_id}] Subcarrier count changed {n_subcarriers} -> "
+                  f"{len(amps)} for {wrong_length_streak} frames; re-latching.", flush=True)
+            n_subcarriers = len(amps)
+            active_idx = np.where(np.abs(amps) > 0)[0]
+            if len(active_idx) == 0:
+                active_idx = np.arange(n_subcarriers)
+            baseline = None
+            calib_amp_buf, calib_rssi_buf = [], []
+            amp_buf.clear()
+            rssi_buf.clear()
+            smoother.reset()
+            roller.reset()
+            warned_mismatch = False  # let the new count warn on its own merits
+            combined_state[node_id] = None
+            await broadcast_combined_if_changed()
+            await broadcast(clients, {"type": "init", "node": node_id,
+                                       "n_subcarriers": int(n_subcarriers),
+                                       "n_active": int(len(active_idx))}, last_status)
+        wrong_length_streak = 0
         subcarrier_mismatch = n_subcarriers != n_expected
+        if not subcarrier_mismatch and warned_mismatch:
+            # Resolved (e.g. the AP went back to 20MHz). Clear the banner
+            # instead of leaving a stale warning on screen forever.
+            warned_mismatch = False
+            await broadcast(clients, {"type": "warning", "node": node_id,
+                "message": ""}, last_status)
         if subcarrier_mismatch and not warned_mismatch:
             warned_mismatch = True
             # A mismatch here means the feature vector this node would build
@@ -247,9 +384,31 @@ async def pump(out_queue, clients, model_bundle, last_status, control, node_id,
             if len(calib_amp_buf) >= calib_frames:
                 baseline = compute_baseline(calib_amp_buf, calib_rssi_buf)
                 roller.set_floor_reference(baseline)
+                # The calibration block IS a measurement of the empty room's
+                # noise floor, and how well this system can possibly work today
+                # depends on it far more than on the model. Report it instead of
+                # discarding it: a loud room degrades accuracy from ~96% to ~90%
+                # with 4x the false alarms, and previously that happened
+                # silently - the operator just saw a flakier system.
+                absolute, relative, amp_scale = baseline_noise_stats(baseline)
+                level, headline, detail = assess_noise_floor(relative)
                 await broadcast(clients, {"type": "calibrated", "node": node_id,
-                    "at_unix_ms": int(time.time() * 1000)}, last_status)
-                print(f"[predict:{node_id}] Calibrated on {len(calib_amp_buf)} frames.", flush=True)
+                    "at_unix_ms": int(time.time() * 1000),
+                    # relative is the comparable-between-nodes figure; the raw
+                    # one and the amplitude scale ride along so the dashboard
+                    # can explain WHY two nodes differ (weak reception vs noise)
+                    "noise_floor": float(relative),
+                    "noise_raw": float(absolute),
+                    "amp_scale": float(amp_scale),
+                    "noise_level": level,
+                    "noise_headline": headline,
+                    "noise_detail": detail}, last_status)
+                print(f"[predict:{node_id}] Calibrated on {len(calib_amp_buf)} frames. "
+                      f"{headline}", flush=True)
+                if level == "loud":
+                    print(f"[predict:{node_id}] WARNING: {detail}", flush=True)
+                    await broadcast(clients, {"type": "warning", "node": node_id,
+                        "message": f"{headline} - {detail}"}, last_status)
             continue  # calibration frames don't get scored
 
         amp_buf.append(amps)
@@ -294,8 +453,15 @@ async def pump(out_queue, clients, model_bundle, last_status, control, node_id,
             new_baseline = roller.observe(confirmed_label, amp_buf[-1], rssi_buf[-1], baseline)
             if new_baseline is not None:
                 baseline = new_baseline
+                absolute, relative, amp_scale = baseline_noise_stats(baseline)
+                level, headline, _ = assess_noise_floor(relative)
                 await broadcast(clients, {"type": "recalibrated", "node": node_id,
-                    "at_unix_ms": int(time.time() * 1000)}, last_status)
+                    "at_unix_ms": int(time.time() * 1000),
+                    "noise_floor": float(relative),
+                    "noise_raw": float(absolute),
+                    "amp_scale": float(amp_scale),
+                    "noise_level": level,
+                    "noise_headline": headline}, last_status)
                 print(f"[predict:{node_id}] Recalibrated (rolling, {calib_frames} confirmed-empty frames).",
                       flush=True)
 
@@ -409,6 +575,18 @@ def main():
         asyncio.run(main_async(args, bundle))
     except KeyboardInterrupt:
         print("\nStopped.")
+    except OSError as e:
+        # Almost always an already-running copy of this server still holding
+        # the port - the same "something else already has it" confusion the
+        # COM ports cause, so say so plainly instead of printing a raw
+        # socket traceback.
+        if getattr(e, "errno", None) in (48, 98, 10048):
+            print(f"\nPort {args.ws_port} is already in use - another copy of this "
+                  f"server is probably still running.\nClose it, or start this one "
+                  f"with a different port: --ws-port {args.ws_port + 1}\n"
+                  f"(the dashboard's WebSocket URL must match).")
+            sys.exit(1)
+        raise
 
 
 if __name__ == "__main__":

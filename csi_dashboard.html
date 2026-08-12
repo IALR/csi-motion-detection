@@ -315,6 +315,24 @@
   .stat-tile .label { font-size: 10.5px; color: var(--text-secondary); margin-bottom: 5px; }
   .stat-tile .value { font-family: var(--font-mono); font-size: 15px; font-weight: 700; }
 
+  /* Noise floor: a status readout, so it uses the reserved status colors
+     (good/warning/critical) rather than any series color, and always pairs
+     the color with a word - never color alone. */
+  .stat-tile .value .noise-label { font-family: system-ui, sans-serif; font-size: 11px; font-weight: 600; display: block; margin-top: 2px; }
+  .stat-tile.noise-quiet .value { color: var(--good); }
+  .stat-tile.noise-moderate .value { color: var(--warn); }
+  .stat-tile.noise-loud .value { color: var(--bad); }
+  .stat-tile.noise-loud { box-shadow: inset 0 0 0 1px var(--bad); }
+
+  /* Reception disparity between nodes - a different problem from a noisy
+     room (antenna/placement, not environment), so it gets its own line. */
+  .signal-compare-note {
+    margin: 12px 0 0; padding: 10px 12px; border-radius: 8px;
+    background: var(--warn-bg); color: var(--warn-text);
+    font-size: 12px; line-height: 1.5;
+    box-shadow: inset 0 0 0 1px var(--warn);
+  }
+
   .recal-log { margin: 10px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--text-secondary); max-height: 120px; overflow-y: auto; }
   .recal-log li { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border-radius: 6px; font-family: var(--font-mono); }
   .recal-log li:nth-child(odd) { background: var(--surface-2); }
@@ -576,6 +594,9 @@
         <div class="stat-row">
           <div class="stat-tile"><div class="label">Last recalibrated</div><div class="value skeleton" id="recal-last-A">–</div></div>
           <div class="stat-tile"><div class="label">Count</div><div class="value" id="recal-count-A">0</div></div>
+          <div class="stat-tile" id="noise-tile-A" title="Jitter as a fraction of received signal, measured while the room was empty. Scale-free, so nodes are directly comparable.">
+            <div class="label">Noise floor</div><div class="value skeleton" id="noise-A">–</div>
+          </div>
         </div>
         <button class="btn-secondary" data-recal-node="A">
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
@@ -590,12 +611,17 @@
         <div class="stat-row">
           <div class="stat-tile"><div class="label">Last recalibrated</div><div class="value skeleton" id="recal-last-B">–</div></div>
           <div class="stat-tile"><div class="label">Count</div><div class="value" id="recal-count-B">0</div></div>
+          <div class="stat-tile" id="noise-tile-B" title="Jitter as a fraction of received signal, measured while the room was empty. Scale-free, so nodes are directly comparable.">
+            <div class="label">Noise floor</div><div class="value skeleton" id="noise-B">–</div>
+          </div>
         </div>
         <button class="btn-secondary" data-recal-node="B">
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
           Force recalibration — Node B
         </button>
       </div>
+
+      <p class="signal-compare-note" id="signal-compare-note" style="display:none"></p>
 
       <ul class="recal-log" id="recal-log"></ul>
     </section>
@@ -663,6 +689,8 @@ function makeNode(id) {
     lastRecalibratedAt: null,
     recalCount: 0,
     discovered: false,
+    noiseFloor: null,      // empty-room noise floor from this node's calibration
+    noiseLevel: null,      // 'quiet' | 'moderate' | 'loud'
   };
 }
 const nodes = { A: makeNode('A') };
@@ -942,12 +970,14 @@ function handleMessage(msg) {
     node.calibText = null;
     node.lastRecalibratedAt = msg.at_unix_ms || Date.now(); // initial calibration counts as the first one
     clearSkeleton(document.getElementById(`recal-last-${node.id}`));
+    updateNoiseFloor(node, msg);
     updateNodeTile(node);
     updateTopCalibPill();
     return;
   }
   if (msg.type === 'recalibrated') {
     const node = getNode(msg.node || 'A');
+    updateNoiseFloor(node, msg);
     node.lastRecalibratedAt = msg.at_unix_ms;
     node.recalCount += 1;
     const countEl = document.getElementById(`recal-count-${node.id}`);
@@ -970,8 +1000,75 @@ function handleMessage(msg) {
 }
 
 function showBanner(text) {
+  // The server sends an empty message to CLEAR a condition that has resolved
+  // (e.g. the AP went back to 20MHz after a channel-width change). Without
+  // this, a stale warning would stay on screen for the rest of the session.
+  if (!text || !text.trim()) {
+    banner.classList.remove('show');
+    return;
+  }
   bannerText.textContent = text;
   banner.classList.add('show');
+}
+
+// How disturbed the room looks while EMPTY, measured during calibration.
+// This is the strongest predictor of how well the system can work right now -
+// in this project's own recordings, a floor above ~3.5 meant empty and moving
+// were nearly indistinguishable (accuracy ~90% with ~11% false alarms, versus
+// ~96%/2.7% in quiet rooms). It used to be measured and discarded, so a bad
+// environment just looked like a flaky model.
+const NOISE_WORDS = { quiet: 'Quiet', moderate: 'Moderate', loud: 'Noisy' };
+
+// The value shown is jitter as a FRACTION of received amplitude, not raw
+// amplitude change, so two nodes are directly comparable. A node receiving a
+// weaker signal has proportionally smaller raw differences and would look
+// misleadingly "cleaner" on a raw scale - measured on this project's own two
+// boards at the same spot, the weaker one read 1.17 raw vs 1.63 for the
+// stronger one while actually being 39% noisier relative to what it received.
+function updateNoiseFloor(node, msg) {
+  if (typeof msg.noise_floor !== 'number') return;
+  node.noiseFloor = msg.noise_floor;
+  node.noiseLevel = msg.noise_level;
+  node.ampScale = msg.amp_scale;
+  const el = document.getElementById(`noise-${node.id}`);
+  const tile = document.getElementById(`noise-tile-${node.id}`);
+  if (!el || !tile) return;
+  clearSkeleton(el);
+  el.innerHTML = '';
+  el.appendChild(document.createTextNode(msg.noise_floor.toFixed(3)));
+  const word = document.createElement('span');
+  word.className = 'noise-label';
+  word.textContent = NOISE_WORDS[msg.noise_level] || msg.noise_level || '';
+  el.appendChild(word);
+  tile.className = 'stat-tile noise-' + (msg.noise_level || 'quiet');
+  let tip = msg.noise_headline || '';
+  if (typeof msg.amp_scale === 'number') {
+    tip += ` · signal amplitude ${msg.amp_scale.toFixed(1)}`;
+    if (typeof msg.noise_raw === 'number') tip += `, raw jitter ${msg.noise_raw.toFixed(2)}`;
+  }
+  if (msg.noise_detail) tip += ' — ' + msg.noise_detail;
+  tile.title = tip;
+  compareNodeSignals();
+}
+
+// When two nodes are up, a large difference in RECEIVED SIGNAL is worth
+// calling out separately from noise: it means one board is receiving badly
+// (antenna, placement), which is a different fix from a noisy room and is not
+// visible from the noise number alone.
+function compareNodeSignals() {
+  const live = Object.values(nodes).filter(n => n.discovered && typeof n.ampScale === 'number');
+  const note = document.getElementById('signal-compare-note');
+  if (!note) return;
+  if (live.length < 2) { note.style.display = 'none'; return; }
+  const strong = live.reduce((a, b) => (a.ampScale >= b.ampScale ? a : b));
+  const weak = live.reduce((a, b) => (a.ampScale <= b.ampScale ? a : b));
+  if (weak.ampScale >= strong.ampScale * 0.7) { note.style.display = 'none'; return; }
+  const pct = Math.round(100 * (1 - weak.ampScale / strong.ampScale));
+  note.style.display = '';
+  note.textContent = `Node ${weak.id} receives ${pct}% less signal than node ${strong.id} `
+    + `(amplitude ${weak.ampScale.toFixed(1)} vs ${strong.ampScale.toFixed(1)}). `
+    + `That is a reception issue — check its antenna and placement, and try swapping `
+    + `the two boards' positions to see whether the problem follows the board or the spot.`;
 }
 
 function updateTopCalibPill() {
@@ -988,7 +1085,15 @@ function updateNodeTile(node) {
   const statusEl = document.getElementById(`node-status-${node.id}`);
   const calibDotEl = document.getElementById(`calib-node-dot-${node.id}`);
   if (!dotEl || !statusEl) return;
-  if (node.calibText) {
+  if (node.confirmed === 'OFFLINE') {
+    // Distinct from "warming up": this node has FAILED (port never opened, or
+    // it stopped streaming) and is no longer counted in the combined result.
+    // Showing it as "warming up" would imply it's about to come back on its
+    // own, which is exactly the wrong thing to believe about a dead sensor.
+    dotEl.className = 'pill-dot bad';
+    statusEl.className = 'node-status';
+    statusEl.textContent = 'offline — not counted';
+  } else if (node.calibText) {
     dotEl.className = 'pill-dot warn';
     statusEl.className = 'node-status';
     statusEl.textContent = node.calibText;
@@ -1090,12 +1195,21 @@ function onFrameInner(node, msg) {
 function describeCombined(nodeMap, overall) {
   const ids = Object.keys(nodeMap);
   if (ids.length <= 1) return null; // single-node mode: nothing extra to say
+  // Offline nodes are excluded from the server's vote, so they must be
+  // excluded from the description too - saying "confirmed empty by all 2
+  // nodes" while one of them is dead states more coverage than actually
+  // exists, which is the one thing a sensor readout must never do.
+  const live = ids.filter(id => nodeMap[id] !== 'OFFLINE');
+  const offline = ids.length - live.length;
+  const suffix = offline > 0 ? ` (${offline} offline)` : '';
   if (overall === 'MOVING') {
-    const contributors = ids.filter(id => nodeMap[id] === 'MOVING');
-    return `confirmed by ${contributors.map(id => 'node ' + id).join(' + ')}`;
+    const contributors = live.filter(id => nodeMap[id] === 'MOVING');
+    return `confirmed by ${contributors.map(id => 'node ' + id).join(' + ')}${suffix}`;
   }
   if (overall === 'EMPTY') {
-    return `confirmed empty by all ${ids.length} nodes`;
+    return live.length === 1
+      ? `confirmed empty by node ${live[0]}${suffix}`
+      : `confirmed empty by all ${live.length} nodes${suffix}`;
   }
   return null;
 }

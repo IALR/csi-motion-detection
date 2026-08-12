@@ -49,8 +49,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import LeaveOneGroupOut
 
-from csi_common import (CALIB_SECONDS_DEFAULT, FRAME_HZ, calibrate_features,
-                         compute_baseline, feature_names, raw_window_stats)
+from csi_common import (CALIB_SECONDS_DEFAULT, FRAME_HZ, assess_noise_floor,
+                         calibrate_features, compute_baseline, feature_names,
+                         raw_window_stats)
 
 
 def load_session(folder):
@@ -138,24 +139,63 @@ def build_dataset(session_folders, window_seconds, calib_seconds=CALIB_SECONDS_D
             raise ValueError(f"{folder}: subcarrier columns differ from other sessions")
 
         n_before = len(df)
-        n_blocks = len(find_empty_block_starts(df["label"].to_numpy()))
+        labels_arr = df["label"].to_numpy()
+        n_blocks = len(find_empty_block_starts(labels_arr))
         for feat, label in windowize(df, amp_cols, window_seconds, calib_seconds):
             X.append(feat)
             y.append(label)
             groups.append(folder)
+
+        # How disturbed this session's room was while EMPTY, and how far apart
+        # the two classes actually are in raw signal. A session where empty and
+        # moving energy are within ~10% of each other is one the model can only
+        # partly separate no matter how it's trained - worth seeing at load
+        # time rather than discovering it as a bad fold much later.
+        amps_arr = df[amp_cols].to_numpy(dtype=float)
+        frame_energy = np.abs(np.diff(amps_arr, axis=0)).mean(axis=1)
+        e_lab = labels_arr[1:]
+        empty_e = frame_energy[e_lab == 0].mean() if (e_lab == 0).any() else float("nan")
+        move_e = frame_energy[e_lab == 2].mean() if (e_lab == 2).any() else float("nan")
+        sep = move_e / empty_e if empty_e else float("nan")
+        # Scale-free, matching what the live system reports: jitter as a
+        # fraction of received amplitude, averaged over active subcarriers
+        # only (dead guard bands sit at zero and would deflate the scale).
+        empty_cols = amps_arr[labels_arr == 0].mean(axis=0)
+        amp_scale = empty_cols[empty_cols > 0].mean() if (empty_cols > 0).any() else float("nan")
+        rel = empty_e / amp_scale if amp_scale else float("nan")
+        level, _, _ = assess_noise_floor(rel)
+        flag = ""
+        if sep < 1.15:
+            flag = "  *** empty/moving barely differ - expect this fold to score poorly"
+        elif level == "loud":
+            flag = "  ** noisy empty room"
+
         print(f"{folder}: {n_before} frames -> "
               f"{sum(1 for g in groups if g == folder)} windows "
               f"({n_blocks} empty block(s), each recalibrated on its own "
               f"first {calib_seconds}s)")
+        print(f"    noise: rel={rel:.4f} [{level}]  (empty={empty_e:.2f} "
+              f"moving={move_e:.2f} sep={sep:.2f}x amp={amp_scale:.1f}){flag}")
 
     return np.array(X), np.array(y), np.array(groups), amp_cols
 
 
+# The sessions and window size the DEPLOYED model was actually trained with.
+# These used to default to the first 4 sessions at a 2.0s window - the values
+# from early development - which meant a bare `python train_model.py` silently
+# retrained on less than half the data at the wrong window size and overwrote
+# csi_model.joblib with a much weaker model. The defaults now match reality,
+# so the no-argument run reproduces the deployed model instead of degrading it.
+DEFAULT_SESSIONS = ["part_1_data", "part_2_data", "part_3_data", "part_4_data",
+                    "part_5_data", "part_6_data", "part_7_data", "part_8_data",
+                    "room2_part_1_data", "room2_part_2_data"]
+DEFAULT_WINDOW_SECONDS = 0.75
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sessions", nargs="+",
-                     default=["part_1_data", "part_2_data", "part_3_data", "part_4_data"])
-    ap.add_argument("--window-seconds", type=float, default=2.0)
+    ap.add_argument("--sessions", nargs="+", default=DEFAULT_SESSIONS)
+    ap.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
     ap.add_argument("--calib-seconds", type=float, default=CALIB_SECONDS_DEFAULT)
     ap.add_argument("--n-estimators", type=int, default=200)
     ap.add_argument("--max-depth", type=int, default=None)
@@ -172,7 +212,7 @@ def main():
           f"{dict(zip(*np.unique(y, return_counts=True)))}\n")
 
     logo = LeaveOneGroupOut()
-    fold_accs = []
+    fold_accs, fold_sizes, fold_names = [], [], []
     for fold, (train_idx, test_idx) in enumerate(logo.split(X, y, groups)):
         held_out = groups[test_idx][0]
         clf = RandomForestClassifier(
@@ -182,6 +222,8 @@ def main():
         pred = clf.predict(X[test_idx])
         acc = accuracy_score(y[test_idx], pred)
         fold_accs.append(acc)
+        fold_sizes.append(len(test_idx))
+        fold_names.append(held_out)
 
         print(f"--- Fold {fold + 1}: held out {held_out} ---")
         print(f"Accuracy: {acc:.4f}")
@@ -190,10 +232,27 @@ def main():
         print(confusion_matrix(y[test_idx], pred))
         print()
 
-    print("=" * 55)
-    print(f"Leave-one-session-out accuracy: {np.mean(fold_accs):.4f} "
-          f"(per-fold: {[round(a, 4) for a in fold_accs]})")
-    print("=" * 55)
+    # Report the WEIGHTED mean as the headline. The unweighted mean of folds
+    # treats a 150-window session as equal to a 600-window one, which flatters
+    # the result whenever the hardest session is also the largest - exactly the
+    # case here (room2_part_1_data is the worst fold AND 18% of all windows).
+    # The weighted figure is the real per-window out-of-fold accuracy: the
+    # fraction of all windows that were classified correctly by a model that
+    # had never seen their session. Both are printed so the gap stays visible.
+    weighted = float(np.average(fold_accs, weights=fold_sizes))
+    unweighted = float(np.mean(fold_accs))
+    worst_i = int(np.argmin(fold_accs))
+
+    note = "  <- optimistic: small easy sessions count as much as big hard ones" \
+        if unweighted > weighted + 0.002 else ""
+
+    print("=" * 70)
+    print(f"Leave-one-session-out accuracy (per-window, weighted): {weighted:.4f}")
+    print(f"  unweighted mean of folds:  {unweighted:.4f}{note}")
+    print(f"  spread across sessions:    std={np.std(fold_accs):.4f}  "
+          f"worst={fold_accs[worst_i]:.4f} ({fold_names[worst_i]})")
+    print(f"  per-fold: {[round(a, 4) for a in fold_accs]}")
+    print("=" * 70)
 
     # Refit on everything for the model you'll actually deploy.
     final_clf = RandomForestClassifier(
