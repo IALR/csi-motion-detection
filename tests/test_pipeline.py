@@ -20,15 +20,18 @@ model, so they cover the live control flow without needing an ESP32.
 """
 import asyncio
 import queue
+import re
 import sys
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import csi_live_server as S
+import train_model
 from csi_common import (NOISE_REL_LOUD, NOISE_REL_QUIET, PredictionSmoother,
                         RollingCalibrator, assess_noise_floor, baseline_noise_stats,
                         compute_baseline, parse_line)
@@ -96,6 +99,57 @@ def test_baseline_std_floor_blocks_dead_subcarrier_blowup():
     assert base["amp_std_floor"] > 0         # ...but the floor is not
     ratio = 0.001 / max(base["amp_std"][3], base["amp_std_floor"])
     assert ratio < 1.0, "dead subcarrier still able to produce a huge ratio"
+
+
+# --------------------------------------------------------------------------
+# Every analysis script must describe the DEPLOYED configuration.
+# Four of them used to hardcode their own session list and window size, each
+# drifted to a different stale subset, and each therefore reported numbers
+# about a model that is not deployed - two documented claims came from them.
+# --------------------------------------------------------------------------
+
+ANALYSIS_SCRIPTS = ["analyze_model", "compare_models", "evaluate_holdout",
+                    "model_evaluation"]
+
+
+@pytest.mark.parametrize("module_name", ANALYSIS_SCRIPTS)
+def test_analysis_scripts_do_not_hardcode_sessions(module_name):
+    """No script may carry its own copy of the session list - they import the
+    one in train_model.py so it cannot drift."""
+    src = (Path(__file__).resolve().parent.parent / f"{module_name}.py").read_text(encoding="utf-8")
+    body = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    # A literal list of session folders is the pattern that kept going stale.
+    assert not re.search(r'default\s*=\s*\[\s*["\']part_\d_data', body), (
+        f"{module_name}.py hardcodes a session list; import DEFAULT_SESSIONS "
+        f"from train_model instead")
+    assert "DEFAULT_SESSIONS" in src, f"{module_name}.py should use DEFAULT_SESSIONS"
+
+
+@pytest.mark.parametrize("module_name", ANALYSIS_SCRIPTS)
+def test_analysis_scripts_use_the_deployed_window(module_name):
+    """Two scripts silently defaulted to a 2.0s window while the deployed
+    model uses 0.75s, so their numbers described a different system."""
+    src = (Path(__file__).resolve().parent.parent / f"{module_name}.py").read_text(encoding="utf-8")
+    assert not re.search(r'"--window-seconds".*default\s*=\s*[\d.]+', src), (
+        f"{module_name}.py sets a literal window default; use "
+        f"DEFAULT_WINDOW_SECONDS from train_model")
+
+
+def test_default_sessions_all_exist_on_disk():
+    root = Path(__file__).resolve().parent.parent
+    for s in train_model.DEFAULT_SESSIONS:
+        assert (root / s / "all_csi_data.csv").exists(), f"{s} is listed but missing"
+
+
+def test_default_window_matches_the_deployed_model():
+    """If csi_model.joblib was trained at a different window than the default,
+    a bare retrain would silently change the deployed behaviour."""
+    bundle_path = Path(__file__).resolve().parent.parent / "csi_model.joblib"
+    if not bundle_path.exists():
+        pytest.skip("no trained model present")
+    bundle = joblib.load(bundle_path)
+    assert bundle["window_seconds"] == train_model.DEFAULT_WINDOW_SECONDS
 
 
 # --------------------------------------------------------------------------

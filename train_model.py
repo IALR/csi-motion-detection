@@ -181,6 +181,15 @@ def build_dataset(session_folders, window_seconds, calib_seconds=CALIB_SECONDS_D
 
 
 # The sessions and window size the DEPLOYED model was actually trained with.
+# EVERY script that builds a dataset imports these rather than keeping its own
+# copy - analyze_model.py, compare_models.py, evaluate_holdout.py and
+# model_evaluation.py each used to hardcode their own list, and each had
+# drifted to a different stale subset (4, 7, 3 and 8 sessions, two of them
+# still at the old 2.0s window). Every one of those scripts was therefore
+# quietly reporting numbers about a configuration that is not deployed, and
+# two claims in README/PROJECT_HISTORY were derived from them. One definition,
+# imported everywhere, is the only thing that stops that recurring.
+#
 # These used to default to the first 4 sessions at a 2.0s window - the values
 # from early development - which meant a bare `python train_model.py` silently
 # retrained on less than half the data at the wrong window size and overwrote

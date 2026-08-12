@@ -12,6 +12,7 @@ Usage:
 import argparse
 
 import numpy as np
+from sklearn.base import clone
 from sklearn.ensemble import (GradientBoostingClassifier,
                                RandomForestClassifier)
 from sklearn.linear_model import LogisticRegression
@@ -23,7 +24,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 from csi_common import CALIB_SECONDS_DEFAULT
-from train_model import build_dataset
+from train_model import DEFAULT_SESSIONS, DEFAULT_WINDOW_SECONDS, build_dataset
 
 # Models that are sensitive to feature scale get a StandardScaler in front.
 # Tree-based models (RF, GB) don't need it - scaling doesn't change their
@@ -40,10 +41,8 @@ MODELS = {
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sessions", nargs="+",
-                     default=["part_1_data", "part_2_data", "part_3_data", "part_4_data",
-                              "part_5_data", "part_6_data", "part_7_data"])
-    ap.add_argument("--window-seconds", type=float, default=0.75)
+    ap.add_argument("--sessions", nargs="+", default=DEFAULT_SESSIONS)
+    ap.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
     ap.add_argument("--calib-seconds", type=float, default=CALIB_SECONDS_DEFAULT)
     args = ap.parse_args()
 
@@ -57,22 +56,34 @@ def main():
     results = []
 
     for name, model in MODELS.items():
-        fold_accs = []
+        fold_accs, fold_sizes = [], []
         for train_idx, test_idx in logo.split(X, y, groups):
-            model.fit(X[train_idx], y[train_idx])
-            pred = model.predict(X[test_idx])
+            # clone() so each fold trains a genuinely fresh estimator. Reusing
+            # one instance happens to work (fit() refits from scratch), but it
+            # leaves the last fold's fitted state on a module-level object,
+            # which is a trap for anyone who later reads MODELS after this runs.
+            est = clone(model)
+            est.fit(X[train_idx], y[train_idx])
+            pred = est.predict(X[test_idx])
             fold_accs.append(accuracy_score(y[test_idx], pred))
-        mean_acc = np.mean(fold_accs)
-        std_acc = np.std(fold_accs)
-        results.append((name, mean_acc, std_acc, fold_accs))
-        print(f"{name:26s}  LOSO mean: {mean_acc:.4f}  (std: {std_acc:.4f})  "
-              f"per-fold: {[round(a, 3) for a in fold_accs]}")
+            fold_sizes.append(len(test_idx))
+        # Weighted = the real per-window accuracy. The unweighted mean counts a
+        # 150-window session the same as a 600-window one, which flatters every
+        # model here equally but by different amounts, so it can even change the
+        # ranking. See train_model.py for the same correction.
+        weighted = float(np.average(fold_accs, weights=fold_sizes))
+        unweighted = float(np.mean(fold_accs))
+        std_acc = float(np.std(fold_accs))
+        results.append((name, weighted, unweighted, std_acc, fold_accs))
+        print(f"{name:26s}  LOSO: {weighted:.4f} weighted / {unweighted:.4f} unweighted  "
+              f"(std: {std_acc:.4f})  per-fold: {[round(a, 3) for a in fold_accs]}")
 
-    print("\n" + "=" * 70)
-    print("Ranked by mean LOSO accuracy:")
-    print("=" * 70)
-    for name, mean_acc, std_acc, _ in sorted(results, key=lambda r: -r[1]):
-        print(f"  {mean_acc:.4f} (±{std_acc:.4f})  {name}")
+    print("\n" + "=" * 78)
+    print("Ranked by WEIGHTED (per-window) LOSO accuracy:")
+    print("=" * 78)
+    for name, weighted, unweighted, std_acc, _ in sorted(results, key=lambda r: -r[1]):
+        print(f"  {weighted:.4f} weighted  {unweighted:.4f} unweighted  "
+              f"(±{std_acc:.4f} across sessions)  {name}")
 
 
 if __name__ == "__main__":

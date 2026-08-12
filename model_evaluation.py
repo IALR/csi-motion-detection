@@ -29,7 +29,8 @@ from sklearn.model_selection import LeaveOneGroupOut
 import matplotlib.pyplot as plt
 
 from csi_common import LABEL_NAMES, feature_names
-from train_model import build_dataset
+from train_model import (DEFAULT_SESSIONS, DEFAULT_WINDOW_SECONDS,
+                          build_dataset)
 
 N_ESTIMATORS = 200
 TOP_K_CORRELATION = 25   # how many features to show in the correlation heatmap
@@ -294,10 +295,8 @@ def plot_rag_summary(pdf, overall_acc, loso_result, overfit_gap, class_counts, r
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sessions", nargs="+",
-                     default=["part_1_data", "part_2_data", "part_3_data", "part_4_data",
-                              "part_5_data", "part_6_data", "part_7_data", "part_8_data"])
-    ap.add_argument("--window-seconds", type=float, default=0.75)
+    ap.add_argument("--sessions", nargs="+", default=DEFAULT_SESSIONS)
+    ap.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
     ap.add_argument("--out", default="model_evaluation_report.pdf")
     args = ap.parse_args()
 

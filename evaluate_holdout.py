@@ -8,8 +8,14 @@ never appears in training at all. This is the honest "does it generalize to
 a new recording session" number.
 
 Usage:
-    python evaluate_holdout.py
-    python evaluate_holdout.py --train part_1_data part_2_data part_3_data --test part_4_data
+    python evaluate_holdout.py --test room2_part_1_data
+    python evaluate_holdout.py --train part_1_data part_2_data --test part_4_data
+
+If --train is omitted it defaults to every known session EXCEPT the ones being
+tested, which is what "does it generalize to this new recording" actually
+means. It used to default to a fixed three-session list that never grew as
+sessions were added, so the answer silently stopped reflecting the real
+training set.
 """
 
 import argparse
@@ -18,16 +24,32 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
-from train_model import build_dataset
+from train_model import (DEFAULT_SESSIONS, DEFAULT_WINDOW_SECONDS,
+                          build_dataset)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--train", nargs="+", default=["part_1_data", "part_2_data", "part_3_data"])
-    ap.add_argument("--test", nargs="+", default=["part_4_data"])
-    ap.add_argument("--window-seconds", type=float, default=2.0)
+    ap.add_argument("--train", nargs="+", default=None,
+                    help="defaults to every known session except those in --test")
+    # Required, not defaulted: this tool's whole answer depends on WHICH
+    # session is held out, and a default quietly gives you an answer about
+    # some arbitrary older session instead of the one you meant to check.
+    ap.add_argument("--test", nargs="+", required=True,
+                    help="session folder(s) to hold out and score on")
+    ap.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
     ap.add_argument("--n-estimators", type=int, default=200)
     args = ap.parse_args()
+
+    if args.train is None:
+        args.train = [s for s in DEFAULT_SESSIONS if s not in args.test]
+        print(f"(--train not given: using all known sessions except {args.test})")
+    overlap = set(args.train) & set(args.test)
+    if overlap:
+        # Otherwise the "held-out" score is measured on data the model trained
+        # on, which silently turns this into a meaningless self-test.
+        ap.error(f"--train and --test overlap on {sorted(overlap)} - a held-out "
+                 f"evaluation requires them to be disjoint")
 
     print(f"Train sessions: {args.train}")
     X_train, y_train, _, amp_cols_train = build_dataset(args.train, args.window_seconds)
