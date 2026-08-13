@@ -122,6 +122,90 @@ def test_baseline_std_floor_blocks_dead_subcarrier_blowup():
 
 
 # --------------------------------------------------------------------------
+# Zone detection (add-on). The binary motion model must stay untouched: the
+# `zone` column sits ALONGSIDE `label`, which keeps its 0/2 values, so every
+# zone recording is also ordinary motion training data.
+# --------------------------------------------------------------------------
+
+def test_collector_keeps_label_binary_and_adds_zone():
+    """The whole add-on design rests on this: zone is a separate column, so
+    train_model.py reads zone recordings without knowing zones exist."""
+    import csi_label_collector as collector
+    assert "zone" in collector.BASE_COLUMNS
+    assert "label" in collector.BASE_COLUMNS
+
+
+def test_collector_parse_line_validates_declared_count():
+    """This is the DATA COLLECTOR - a short row written here is permanent."""
+    import csi_label_collector as collector
+    assert collector.parse_line("CSI_AMP,1,0,4,-40,1,2,3,4", True) is not None
+    assert collector.parse_line("CSI_AMP,1,0,4,-40,1,2", True) is None
+    assert collector.parse_line("CSI_AMP,1,0,4,-40,1,2,3,4,5", True) is None
+
+
+def test_zone_dataset_rejects_sessions_without_a_zone_column(tmp_path):
+    import train_zone_model as tz
+    d = tmp_path / "old_session"
+    d.mkdir()
+    (d / "all_csi_data.csv").write_text(
+        "session_id,host_unix_us,timestamp_us,label,esp_label,settling,rssi,"
+        "num_subcarriers,amp_0\ns,1,1,0,0,0,-50,1,10\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no 'zone' column"):
+        tz.load_node(str(d))
+
+
+def test_zone_confounding_guard_fires():
+    """One zone per session makes 'which zone' and 'which session' the same
+    question - a model then scores ~100% while knowing nothing about position.
+    This must be a hard error, not a warning."""
+    import train_zone_model as tz
+    y = np.array([1, 1, 1, 2, 2, 2])
+    groups = np.array(["s1", "s1", "s1", "s2", "s2", "s2"])
+    with pytest.raises(SystemExit, match="CONFOUNDED"):
+        tz.check_not_confounded(y, groups)
+
+
+def test_zone_confounding_guard_passes_alternating_sessions():
+    import train_zone_model as tz
+    y = np.array([1, 2, 1, 2])
+    groups = np.array(["s1", "s1", "s2", "s2"])
+    tz.check_not_confounded(y, groups)  # must not raise
+
+
+def test_zone_gate_thresholds_are_ordered_and_honest():
+    """Chance is 50% for two zones; the gate must call anything near it a
+    failure rather than dressing it up."""
+    import train_zone_model as tz
+    assert tz.GATE_ABANDON < tz.GATE_MARGINAL < tz.GATE_USEFUL
+    assert tz.verdict(0.52)[0] == "ABANDON"
+    assert tz.verdict(0.70)[0] == "MARGINAL"
+    assert tz.verdict(0.80)[0] == "USEFUL"
+    assert tz.verdict(0.92)[0] == "STRONG"
+
+
+def test_zone_windows_exclude_empty_and_untagged():
+    """A zone is meaningless when the room is empty, and an untagged ('m')
+    moving block carries zone 0 - neither may enter the zone dataset."""
+    import train_zone_model as tz
+    import pandas as pd
+    n_sub, fpw = 8, 8
+    rows = []
+    host, ts = 1_000_000_000, 0
+    # empty block (needed for the baseline), then zone-1, then untagged moving
+    for label, zone, count in [(0, 0, 120), (2, 1, 24), (2, 0, 24)]:
+        for _ in range(count):
+            rows.append([host, ts, label, zone, 0, -50.0] + [20.0] * n_sub)
+            host += 100_000
+            ts += 100_000
+    cols = ["host_unix_us", "timestamp_us", "label", "zone", "settling", "rssi"] + \
+           [f"amp_{i}" for i in range(n_sub)]
+    df = pd.DataFrame(rows, columns=cols)
+    got = list(tz.windowize_zones(df, [f"amp_{i}" for i in range(n_sub)], 0.75, 10.0))
+    assert got, "expected at least one zone-1 window"
+    assert {z for _, _, z in got} == {1}, "only zone-tagged moving windows may appear"
+
+
+# --------------------------------------------------------------------------
 # Every analysis script must describe the DEPLOYED configuration.
 # Four of them used to hardcode their own session list and window size, each
 # drifted to a different stale subset, and each therefore reported numbers

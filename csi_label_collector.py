@@ -18,11 +18,28 @@ them at training time. Frames while waiting for 'm' are not recorded.
 
 Requires the improved firmware (emits rssi). Run with --rssi-field.
 
+ZONES (optional, for position detection)
+----------------------------------------
+Pressing '1' or '2' instead of 'm' tags that moving block with a zone, written
+to a separate `zone` column. The `label` column stays 0/2 regardless, so a
+zone recording is ALSO ordinary training data for the binary motion model -
+train_model.py reads it unchanged and never looks at `zone`.
+
+For zone work, record BOTH boards at once with --port-b: the two nodes must
+cover the same events from different angles to be combinable. Each node then
+writes into its own node_a/ and node_b/ subfolder. Alternate the zones WITHIN
+each session (zone 1, then zone 2, then zone 1...) - recording one zone per
+session would confound zone with session and produce a meaningless score.
+
 Usage:
-    python csi_auto_collector.py -p COM9 -b 921600 --subcarriers 128 --rssi-field
+    python csi_label_collector.py -p COM9 -b 921600 --subcarriers 128 --rssi-field
+    python csi_label_collector.py -p COM9 --port-b COM6 -b 921600 \
+        --subcarriers 128 --rssi-field -o zone_room1_part_1_data
 
 Controls while running:
-    m  -> start a MOVING block (only does something while waiting)
+    m  -> start a plain MOVING block (zone 0)
+    1  -> start a MOVING block tagged ZONE 1
+    2  -> start a MOVING block tagged ZONE 2
     q  -> stop and save
 """
 
@@ -81,7 +98,13 @@ class KeyReader:
         return None
 
 
-BASE_COLUMNS = ["session_id", "host_unix_us", "timestamp_us", "label",
+# `zone` sits alongside `label`, it does NOT replace it: label stays 0/2 exactly
+# as before, so every recording made here remains valid training data for the
+# binary motion model with no changes to train_model.py. zone is 0 for empty
+# blocks and for plain 'm' moving blocks, and 1/2 when a zone key was used.
+# Older CSVs predate this column; anything reading zone must cope with it being
+# absent (train_model.py never reads it, so it is unaffected).
+BASE_COLUMNS = ["session_id", "host_unix_us", "timestamp_us", "label", "zone",
                 "esp_label", "settling", "rssi", "num_subcarriers"]
 
 
@@ -100,6 +123,17 @@ MARKER = "CSI_AMP,"
 
 
 def parse_line(line, rssi_field):
+    """Firmware format: CSI_AMP,<ts_us>,<label>,<num_subcarriers>,<rssi>,<amp0>,...
+
+    Values stay as STRINGS here (unlike csi_common.parse_line, which returns
+    floats) because they are written to CSV verbatim - re-parsing them to float
+    and back would lose the firmware's exact integer formatting.
+
+    The declared subcarrier count is checked against how many amplitudes
+    actually arrived. A line mangled in transit can still contain the marker
+    and still split into enough fields to look valid, just short - and this is
+    the DATA COLLECTOR, so an unchecked short row would be written into the
+    training set permanently."""
     i = line.find(MARKER)
     if i == -1:
         return None
@@ -111,12 +145,117 @@ def parse_line(line, rssi_field):
         rssi, amps = p[4], p[5:]
     else:
         rssi, amps = "", p[4:]
+    try:
+        if int(num) != len(amps):
+            return None
+    except ValueError:
+        return None
     return ts, esp_label, num, rssi, amps
+
+
+class NodeRecorder:
+    """One ESP32's serial connection plus its CSV writers.
+
+    Exists so a single state machine can drive one OR two boards: zone
+    detection benefits from both nodes' viewpoints, and the two recordings
+    must cover the SAME events to be combinable, which means one shared
+    protocol driving both ports rather than two separate runs.
+
+    In single-node mode `out_dir` is the session folder itself, so the output
+    is byte-identical to before this class existed. With --port-b each node
+    gets its own subfolder.
+    """
+
+    def __init__(self, node_id, port, baud, out_dir, session_id,
+                 amplitude_count, rssi_field):
+        self.node_id = node_id
+        self.out_dir = out_dir
+        self.session_id = session_id
+        self.rssi_field = rssi_field
+        self.amplitude_count = amplitude_count
+        os.makedirs(out_dir, exist_ok=True)
+        self.ser = serial.Serial(port, baud, timeout=0)
+        self.ser.reset_input_buffer()
+        self._rx = ""
+        self._all_path = os.path.join(out_dir, "all_csi_data.csv")
+        self._all_file = self._all_writer = None
+        self._handles, self._writers = {}, {}
+        self.counts = defaultdict(int)
+        self.rejected = defaultdict(int)
+
+    def drain(self):
+        try:
+            k = self.ser.in_waiting
+            if k:
+                self._rx += self.ser.read(k).decode("utf-8", errors="ignore")
+        except Exception:
+            return []
+        out = []
+        if "\n" in self._rx:
+            *lines, self._rx = self._rx.split("\n")
+            for ln in lines:
+                r = parse_line(ln, self.rssi_field)
+                if r:
+                    out.append(r)
+        return out
+
+    def tell_esp(self, ch):
+        try:
+            self.ser.write(ch.encode("ascii"))
+            self.ser.flush()
+        except Exception:
+            pass
+
+    def _writer_for(self, label):
+        if self._all_writer is None:
+            self._all_file, self._all_writer = open_csv(self._all_path,
+                                                         self.amplitude_count)
+        if label not in self._handles:
+            h, w = open_csv(os.path.join(self.out_dir, f"label_{label}.csv"),
+                            self.amplitude_count)
+            self._handles[label], self._writers[label] = h, w
+        return self._all_writer, self._writers[label]
+
+    def record(self, frames, label, settling, zone=0):
+        for ts, esp_label, num, rssi, amps in frames:
+            if self.amplitude_count is None:
+                self.amplitude_count = len(amps)
+                print(f"[{self.node_id}] locked to {self.amplitude_count} subcarriers.")
+            if len(amps) != self.amplitude_count:
+                self.rejected[f"{len(amps)}sc"] += 1
+                continue
+            aw, lw = self._writer_for(label)
+            row = [self.session_id, int(time.time() * 1e6), ts, label, zone,
+                   esp_label, settling, rssi, num] + amps
+            aw.writerow(row)
+            lw.writerow(row)
+            self.counts[label] += 1
+
+    def flush(self):
+        if self._all_file:
+            self._all_file.flush()
+        for h in self._handles.values():
+            h.flush()
+
+    def close(self):
+        if self._all_file:
+            self._all_file.close()
+        for h in self._handles.values():
+            h.close()
+        try:
+            self.ser.close()
+        except Exception:
+            pass
 
 
 def main():
     ap = argparse.ArgumentParser(description="Auto-cycling empty/moving CSI collector.")
     ap.add_argument("-p", "--port", default="COM9")
+    ap.add_argument("--port-b", default=None,
+                    help="Second ESP32's port. Both boards then record the SAME "
+                         "protocol simultaneously, into node_a/ and node_b/ "
+                         "subfolders - needed for zone detection, which relies on "
+                         "the two nodes seeing the same events from different angles.")
     ap.add_argument("-b", "--baud", type=int, default=921600)
     ap.add_argument("-o", "--output-dir", default=None)
     ap.add_argument("--subcarriers", type=int, default=None,
@@ -132,77 +271,49 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
 
-    all_path = os.path.join(args.output_dir, "all_csi_data.csv")
-    all_file = all_writer = None
-    handles, writers = {}, {}
-    amplitude_count = args.subcarriers
-    counts = defaultdict(int)
-    rejected = defaultdict(int)
+    # Single node keeps writing straight into the session folder, exactly as
+    # before, so existing sessions and every path in train_model.py still work.
+    specs = [("A", args.port, args.output_dir)]
+    if args.port_b:
+        specs = [("A", args.port, os.path.join(args.output_dir, "node_a")),
+                 ("B", args.port_b, os.path.join(args.output_dir, "node_b"))]
 
+    nodes = []
     try:
-        ser = serial.Serial(args.port, args.baud, timeout=0)
+        for node_id, port, out_dir in specs:
+            nodes.append(NodeRecorder(node_id, port, args.baud, out_dir, session_id,
+                                       args.subcarriers, args.rssi_field))
     except serial.SerialException as e:
-        print(f"Could not open {args.port}: {e}")
+        for n in nodes:
+            n.close()
+        print(f"Could not open a serial port: {e}")
         sys.exit(1)
-    ser.reset_input_buffer()
-    rxbuf = {"s": ""}
 
-    def drain():
-        try:
-            k = ser.in_waiting
-            if k:
-                rxbuf["s"] += ser.read(k).decode("utf-8", errors="ignore")
-        except Exception:
-            return []
-        out = []
-        if "\n" in rxbuf["s"]:
-            *lines, rxbuf["s"] = rxbuf["s"].split("\n")
-            for ln in lines:
-                r = parse_line(ln, args.rssi_field)
-                if r:
-                    out.append(r)
-        return out
+    def record_all(frames_by_node, label, settling, zone=0):
+        for n, frames in zip(nodes, frames_by_node):
+            n.record(frames, label, settling, zone)
 
-    def tell_esp(ch):
-        try:
-            ser.write(ch.encode("ascii")); ser.flush()
-        except Exception:
-            pass
+    def tell_all(ch):
+        for n in nodes:
+            n.tell_esp(ch)
 
-    def writer_for(label):
-        nonlocal all_file, all_writer
-        if all_writer is None:
-            all_file, all_writer = open_csv(all_path, amplitude_count)
-        if label not in handles:
-            h, w = open_csv(os.path.join(args.output_dir, f"label_{label}.csv"),
-                            amplitude_count)
-            handles[label], writers[label] = h, w
-        return all_writer, writers[label]
-
-    def record(frames, label, settling):
-        nonlocal amplitude_count
-        for ts, esp_label, num, rssi, amps in frames:
-            if amplitude_count is None:
-                amplitude_count = len(amps)
-                print(f"Locked to {amplitude_count} subcarriers.")
-            if len(amps) != amplitude_count:
-                rejected[f"{len(amps)}sc"] += 1
-                continue
-            aw, lw = writer_for(label)
-            row = [session_id, int(time.time() * 1e6), ts, label,
-                   esp_label, settling, rssi, num] + amps
-            aw.writerow(row); lw.writerow(row)
-            counts[label] += 1
+    def row_summary():
+        return " | ".join(f"{n.node_id}:L0={n.counts['0']},L2={n.counts['2']}"
+                          for n in nodes)
 
     # ---- state machine ----
     # states: LEAVE (5s->empty), EMPTY (60s), WAIT (idle), MOVING (60s)
+    # One machine drives every node, so both boards record the same events.
     state = "LEAVE"
     state_end = time.time() + args.leave_seconds
     last_tick = 0
-    tell_esp("e")
+    zone = 0            # which zone the CURRENT moving block is recording
+    last_flush = 0
+    tell_all("e")
 
     print(f"Session {session_id}")
-    print(f"Writing to {os.path.abspath(args.output_dir)}\n")
+    print(f"Writing to {os.path.abspath(args.output_dir)}")
+    print(f"Nodes: " + ", ".join(f"{nid}={port}" for nid, port, _ in specs) + "\n")
     print(">>> LEAVE THE ROOM NOW <<<")
 
     try:
@@ -215,10 +326,10 @@ def main():
 
                 now = time.time()
                 remain = state_end - now
-                frames = drain()
+                frames_by_node = [n.drain() for n in nodes]
 
                 if state == "LEAVE":
-                    record(frames, "0", settling=1)   # kept but flagged
+                    record_all(frames_by_node, "0", settling=1)   # kept but flagged
                     if int(remain) != last_tick:
                         last_tick = int(remain)
                         print(f"  leaving... {max(0,int(remain)+1)} s", end="\r", flush=True)
@@ -227,54 +338,61 @@ def main():
                         print("\n>>> RECORDING EMPTY (60 s) <<<          ")
 
                 elif state == "EMPTY":
-                    record(frames, "0", settling=0)
+                    record_all(frames_by_node, "0", settling=0)
                     if int(remain) != last_tick:
                         last_tick = int(remain)
-                        print(f"  empty  {max(0,int(remain))} s | rows L0:{counts['0']} L2:{counts['2']}",
+                        print(f"  empty  {max(0,int(remain))} s | {row_summary()}",
                               end="\r", flush=True)
                     if remain <= 0:
                         state = "WAIT"
-                        print("\n>>> Come back in. Press 'm' when ready to MOVE. <<<")
+                        print("\n>>> Come back in. Press '1' or '2' for a ZONE, "
+                              "or 'm' for plain moving. <<<")
 
                 elif state == "WAIT":
                     # not recording; person is returning to the room
-                    if key == "m":
-                        tell_esp("m")
+                    if key in ("m", "1", "2"):
+                        # '1'/'2' tag the block with a zone; 'm' behaves exactly
+                        # as it always has (zone 0 = not applicable). The LABEL
+                        # is "2" either way, so the binary motion pipeline reads
+                        # zone recordings without knowing zones exist.
+                        zone = 0 if key == "m" else int(key)
+                        tell_all("m")
                         state, state_end = "MOVING", now + args.block_seconds
-                        print(">>> RECORDING MOVING (60 s) <<<")
+                        where = "MOVING" if zone == 0 else f"MOVING in ZONE {zone}"
+                        print(f">>> RECORDING {where} (60 s) <<<")
 
                 elif state == "MOVING":
-                    record(frames, "2", settling=0)
+                    record_all(frames_by_node, "2", settling=0, zone=zone)
                     if int(remain) != last_tick:
                         last_tick = int(remain)
-                        print(f"  moving {max(0,int(remain))} s | rows L0:{counts['0']} L2:{counts['2']}",
+                        tag = "moving" if zone == 0 else f"zone {zone}"
+                        print(f"  {tag} {max(0,int(remain))} s | {row_summary()}",
                               end="\r", flush=True)
                     if remain <= 0:
-                        tell_esp("e")
+                        tell_all("e")
+                        zone = 0
                         state, state_end = "LEAVE", now + args.leave_seconds
                         print("\n>>> LEAVE THE ROOM NOW <<<")
 
                 # flush ~1/s
-                if all_file and int(now) != getattr(record, "_lf", 0):
-                    record._lf = int(now)
-                    all_file.flush()
-                    for h in handles.values():
-                        h.flush()
+                if int(now) != last_flush:
+                    last_flush = int(now)
+                    for n in nodes:
+                        n.flush()
 
                 time.sleep(0.005)
     finally:
-        if all_file:
-            all_file.close()
-        for h in handles.values():
-            h.close()
-        ser.close()
+        for n in nodes:
+            n.close()
 
     print("\n--- summary ---")
     print(f"session {session_id}")
-    for lbl in sorted(counts):
-        print(f"  label {lbl}: {counts[lbl]} rows")
-    if rejected:
-        print("  rejected:", dict(rejected))
+    for n in nodes:
+        print(f"  node {n.node_id} -> {n.out_dir}")
+        for lbl in sorted(n.counts):
+            print(f"    label {lbl}: {n.counts[lbl]} rows")
+        if n.rejected:
+            print("    rejected:", dict(n.rejected))
 
 
 if __name__ == "__main__":

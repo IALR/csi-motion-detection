@@ -1256,6 +1256,94 @@ more coverage than is actually voting.
 
 ---
 
+## 26. Zone (position) detection — scope, and the add-on architecture
+
+**Why asked:** the user wanted to detect *where* the person is, not just
+whether someone is moving.
+
+**What remains impossible, and why.** True (x, y) coordinates need signal
+**phase** and multiple **synchronised** antennas per receiver. The firmware
+computes `sqrt(imag²+real²)` and discards phase before anything leaves the
+board (`firmware/main/csi_node.c:143`); each ESP32-S3 has one antenna; the two
+boards share no clock. The person is a *passive reflector*, not a transmitter,
+so there is nothing to trilaterate. This was explained and accepted earlier
+(§18's deferred list) and has not changed.
+
+**What became possible with two nodes: zone classification.** Learn what each
+half of the room looks like and recognise it. Two physically separated nodes
+give two viewpoints, which disambiguates positions a single link cannot. Scoped
+deliberately small with the user: **2 zones**, and **added on top** rather than
+replacing anything.
+
+**The design decision that makes this cheap: a `zone` column, not new label
+values.** `label` stays 0/2 exactly as before; a separate `zone` column carries
+0/1/2. An audit of the codebase found that introducing labels 3/4 instead would
+have broken, mostly *silently*:
+- `compute_combined()` — two nodes on different zones match neither branch,
+  return `None`, and the dashboard sits on "warming up" while both nodes
+  confidently see someone.
+- `csi_dashboard.html` `const isMoving = overall === 'MOVING'` — any other
+  value renders **green/empty** while printing the zone name. Reads *safe*
+  while the room is occupied: the worst possible failure direction.
+- `labels=[0,2]` in `evaluate_holdout.py`, `analyze_model.py`,
+  `model_evaluation.py` — silently *drops* unknown classes from confusion
+  matrices.
+- `RollingCalibrator.observe`'s `confirmed_label != 0` and
+  `find_empty_block_starts`' `lbl == 0` both encode "0 means genuinely empty".
+
+With the separate column, none of that is touched, and there is a real bonus:
+**every zone recording is also ordinary training data for the motion model**,
+since `label` still reads 0/2 and `build_dataset` never looks at `zone`.
+Verified after the change: 57 pre-existing tests still pass and
+`train_model.py` still reports **0.9425 weighted**, unchanged.
+
+**Collector** (`csi_label_collector.py`): pressing `1`/`2` instead of `m` tags
+a moving block with a zone; `m` still works exactly as before (zone 0). Added
+`--port-b` so both boards record the **same** protocol simultaneously into
+`node_a/` and `node_b/` — the two recordings must cover the same events to be
+combinable, which two separate runs cannot achieve. Single-node output is
+byte-identical to before. Also fixed a latent bug found earlier: the
+collector's private `parse_line` read the declared subcarrier count and never
+checked it, so a mangled line could write a short row permanently into the
+training set.
+
+**`train_zone_model.py`** trains only on MOVING windows (a zone is meaningless
+in an empty room), reusing `csi_common`'s feature math unchanged, and compares
+three variants under leave-one-**session**-out: node A alone, node B alone,
+both concatenated (532 features). Per-node models are far simpler to run live —
+each pump already owns its window and baseline — whereas the combined variant
+needs the two live pumps to share a time-aligned buffer, so it has to earn its
+place by being clearly better, not merely equal. Combined features align on
+`host_unix_us`, the **collector's** clock: the two ESP32s free-run on
+independent clocks, so their own `timestamp_us` values are not comparable.
+
+**Two guards against fooling ourselves**, both hard errors rather than warnings:
+1. **Confounding check.** If any session contains only one zone, "which zone"
+   and "which session" are the same question, and a model scores ~100% under
+   LOSO while knowing nothing about position. The script refuses to print an
+   accuracy in that case and tells you to alternate zones within each session.
+2. **A decision gate fixed before any data was seen.** Chance is 50%. Below
+   60% = abandon; 60-75% = too unreliable to act on; 75-85% = useful; above
+   85% = re-verify the protocol. A per-fold spread over 0.20 is flagged as
+   session memorisation regardless of the mean.
+
+**Honest expectation, recorded before the result exists**: this may well fail.
+It rests entirely on amplitude fingerprints being distinguishable; the project
+has already measured that the empty-room noise floor swings ~9× between
+recordings, and fingerprinting is precisely the technique most sensitive to
+that drift. §13's order-invariant features were added to make the model *ignore*
+which subcarrier fires (to help cross-room transfer); zone detection needs the
+opposite, and will lean on exactly the per-index features that do **not**
+generalise between rooms. A zone model is therefore inherently room-specific.
+The gate exists so this is discovered after ~1 hour of recording rather than
+after building a dashboard for it.
+
+**Status at time of writing**: collector and training script built and tested
+(64 tests). **No zone data recorded yet, so no accuracy number exists** — do
+not quote one until `train_zone_model.py` has actually run.
+
+---
+
 ## Working style notes for whoever picks this up
 
 - The user wants concrete numbers and real diagnosis, not reassurance. When

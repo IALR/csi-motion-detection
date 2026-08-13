@@ -110,6 +110,9 @@ compare_models.py           Compares 6 ML model families under identical validat
 full_model_report.py        Generic LOSO evaluation report generator (16 metrics, ~20 figures, PDF)
 diagnose_nodes.py           Hardware diagnosis: compares two nodes' signal strength and
                              noise floor to separate a noisy room from a bad board/antenna
+train_zone_model.py         Add-on experiment: 2-zone position classifier (see §26).
+                             Leaves the motion model untouched; refuses to report a
+                             number if zone and session are confounded
 
 csi_live_predict.py         Matplotlib desktop live inference tool
 csi_live_server.py          WebSocket backend for the browser dashboard, supports 1 or 2 ESP32 nodes (--port-b)
@@ -231,9 +234,12 @@ monitor or the collector before running a live inference tool.
   person's walking. Not yet tested against a different person or movement
   type — the single biggest remaining generalization gap.
 - **Not true position/localization.** This detects *whether* someone is
-  moving, not *where*. Real position tracking needs phase data and multiple
-  synchronized antennas, which this amplitude-only, unsynchronized setup
-  doesn't have — even with 2 nodes.
+  moving, not *where* in coordinates. Real (x, y) tracking needs phase data and
+  multiple synchronized antennas, which this amplitude-only, unsynchronized
+  setup doesn't have — even with 2 nodes. Coarse **zone** classification
+  (which half of the room) is a separate, add-on experiment — see
+  `train_zone_model.py` and `docs/PROJECT_HISTORY.md` §26. It is room-specific
+  and, as of writing, **unproven**: no zone data has been recorded yet.
 
 ---
 
