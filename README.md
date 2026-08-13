@@ -191,6 +191,14 @@ nodes' states combined with OR (MOVING if either node says MOVING). For the
 coverage benefit to actually matter, place the two boards apart from each
 other (e.g. diagonally opposite corners of the room), not side by side.
 
+Because the nodes are OR'd, one node throwing false alarms makes the whole
+system throw them. Each node tile has a **Mute** button that withdraws that
+node's vote while leaving it streaming and visible — useful when one board is
+in a bad spot or a noisy patch. It's manual on purpose: measured on this
+project's own recordings, the noise reading can't reliably predict which node
+will misbehave (two sessions with near-identical noise floors had 0.7% and
+26% false-alarm rates), so an automatic version would silence good nodes too.
+
 Only one program can hold a given serial port at a time — close the IDF
 monitor or the collector before running a live inference tool.
 

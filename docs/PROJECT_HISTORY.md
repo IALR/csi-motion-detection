@@ -1184,6 +1184,78 @@ SPOT it is placement. Not yet done.
 
 ---
 
+## 25. Stale analysis defaults, and a per-node mute (with a rejected fix)
+
+**Why asked:** the user asked what else was worth improving, after a 30-40
+minute live run with two nodes that produced no false alarms and visibly
+better coverage.
+
+**Every analysis script was reporting on a model that isn't deployed.**
+§22 fixed `train_model.py`'s stale CLI defaults but stopped there. The other
+four scripts each carried their own hardcoded copy, and each had drifted to a
+*different* stale subset:
+
+| script | sessions | window |
+|---|---|---|
+| `analyze_model.py` | 4, hardcoded, no CLI at all | 2.0s |
+| `evaluate_holdout.py` | 3 train / 1 test | 2.0s |
+| `compare_models.py` | 7 | 0.75s |
+| `model_evaluation.py` | 8 | 0.75s |
+
+So README's "best of 6 compared model families — Random Forest wins
+outright" came from a 7-session run, and §20's RAG health summary from an
+8-session one. All four now import `DEFAULT_SESSIONS` /
+`DEFAULT_WINDOW_SECONDS` from `train_model.py` — the same
+single-source-of-truth pattern `csi_common.py` already uses for feature math
+— with tests enforcing that no script reintroduces a literal list, plus one
+asserting the default window still matches the deployed `csi_model.joblib`.
+Also: `analyze_model.py` gained a CLI, `compare_models.py` now reports
+weighted accuracy and clones estimators per fold, and `evaluate_holdout.py`
+now *requires* `--test`, defaults `--train` to "everything except the test
+sessions", and rejects overlapping train/test outright rather than silently
+running a self-test. Verified: holding out `room2_part_1_data` gives 0.8467,
+matching its LOSO fold exactly.
+
+**A fix that was proposed, tested, and REJECTED.** Because nodes are OR'd,
+one node throwing false alarms makes the whole system throw them — and node
+B is the noisier of the user's two boards. Two automatic remedies were
+considered:
+
+1. *Longer smoothing for a noisy node*, on the theory that false alarms are
+   transient bursts while real motion persists. **Measured on out-of-fold
+   predictions: it does nothing.** In the loud sessions, false alarms went
+   12.6% (size 5) → 12.7% (size 9) while accuracy fell 0.9137 → 0.9075,
+   misses rose 4.7% → 5.8%, and reaction slowed from 1.8 to 3.7 windows. The
+   false alarms are not blips: in a genuinely disturbed room the model is
+   *consistently* wrong for long stretches, and smoothing cannot rescue a
+   persistently wrong signal. Size 5 was best in every regime tested.
+2. *Gating a node whose noise floor reads "loud"*. **The noise floor doesn't
+   predict false alarms well enough to gate on**: `part_8` (0.216) had 0.7%
+   false alarms while `room2_part_1` (0.221) had 26.3%. Nearly identical
+   noise, a 37x difference in outcome. Gating would have disabled `part_8`,
+   which was performing fine, and would cost exactly the coverage the second
+   node was added for.
+
+Neither was shipped. Recorded here because both were plausible and both were
+refuted by measurement rather than argument.
+
+**What was built instead: a manual per-node mute.** A button on each node
+tile withdraws that node's vote — `compute_combined()` excludes muted nodes
+exactly as it excludes OFFLINE ones. The node keeps streaming and stays fully
+visible (waterfall, RSSI, energy, its own confirmed state); only its vote is
+withdrawn. Human-in-the-loop precisely *because* the automatic version
+doesn't work: the operator can see which node is misbehaving when no
+available signal reliably predicts it. Mute state lives on the server, is
+echoed in every `combined` broadcast, and is reconciled by the client on
+every message, so a second browser tab or a reconnect stays in sync. If every
+node ends up muted or offline the result is `None`, never EMPTY — the same
+rule as §22: an empty room is never *inferred* from the absence of
+participating sensors. The hero badge and `describeCombined()` both report
+the mute ("confirmed empty by node A (1 muted)") so the readout never claims
+more coverage than is actually voting.
+
+---
+
 ## Working style notes for whoever picks this up
 
 - The user wants concrete numbers and real diagnosis, not reassurance. When

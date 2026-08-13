@@ -84,6 +84,26 @@ def test_compute_combined(state, expected):
     assert S.compute_combined(state) == expected
 
 
+@pytest.mark.parametrize("state,muted,expected,why", [
+    ({"A": "EMPTY", "B": "MOVING"}, {"B"},      "EMPTY",
+     "the whole point: a muted node's false alarm must not reach the output"),
+    ({"A": "MOVING", "B": "EMPTY"}, {"B"},      "MOVING",
+     "muting B must never suppress A's genuine detection"),
+    ({"A": "EMPTY", "B": "EMPTY"},  {"B"},      "EMPTY",
+     "muting an agreeing node changes nothing"),
+    ({"A": "EMPTY", "B": "MOVING"}, {"A", "B"}, None,
+     "everything muted is UNKNOWN - never infer an empty room"),
+    ({"A": "MOVING"},               {"A"},      None,
+     "muting the only node is unknown, not empty"),
+    ({"A": S.OFFLINE, "B": "MOVING"}, {"B"},    None,
+     "offline plus muted leaves nobody voting"),
+    ({"A": "EMPTY", "B": "MOVING"}, set(),      "MOVING",
+     "unmuted again, B's vote counts once more"),
+])
+def test_compute_combined_with_muted_nodes(state, muted, expected, why):
+    assert S.compute_combined(state, muted) == expected, why
+
+
 # --------------------------------------------------------------------------
 # csi_common calibration primitives
 # --------------------------------------------------------------------------
@@ -303,7 +323,7 @@ async def _drive(scenario, n_sub=8, extra_nodes=None):
     last_combined = [None]
     task = asyncio.create_task(
         S.pump(q, set(), _bundle(n_sub), {}, {"recalibrate": False}, "A",
-               combined_state, last_combined))
+               combined_state, last_combined, set()))
     try:
         await scenario(q, combined_state, last_combined)
     finally:

@@ -171,7 +171,7 @@ NODE_STALE_SECONDS = 20.0  # no frames for this long -> treat the node as offlin
 SUBCARRIER_RELATCH_FRAMES = 20  # sustained wrong-length frames before re-latching
 
 
-def compute_combined(combined_state):
+def compute_combined(combined_state, muted=()):
     """OR logic: any node confirming MOVING is immediate MOVING (don't wait
     for a still-calibrating second node to catch what the first already
     caught). Only reports EMPTY once every participating node has confirmed
@@ -187,10 +187,22 @@ def compute_combined(combined_state):
     node worked perfectly. A node that isn't reporting must not get a vote;
     it must not silently veto the nodes that are.
 
-    If EVERY node is offline the result is None, not EMPTY - no data means
-    unknown, and an empty room must never be *inferred* from the absence of
-    working sensors."""
-    values = [v for v in combined_state.values() if v != OFFLINE]
+    MUTED nodes are excluded the same way. Muting is manual and deliberate:
+    because the two nodes are OR'd, one node throwing false alarms makes the
+    WHOLE system throw them, and there is no reliable way to detect that
+    automatically - measured on this project's own sessions, two recordings
+    with near-identical noise floors (0.216 and 0.221) had false-alarm rates
+    of 0.7% and 26.3%, so the noise reading cannot be used to gate a node
+    without also gating good ones. The operator can see which node is
+    misbehaving; this lets them act on that without restarting anything. A
+    muted node keeps streaming and stays fully visible - it just stops
+    voting.
+
+    If EVERY node is offline or muted the result is None, not EMPTY - no
+    data means unknown, and an empty room must never be *inferred* from the
+    absence of participating sensors."""
+    values = [v for k, v in combined_state.items()
+              if v != OFFLINE and k not in muted]
     if "MOVING" in values:
         return "MOVING"
     if values and all(v == "EMPTY" for v in values):
@@ -198,8 +210,24 @@ def compute_combined(combined_state):
     return None
 
 
+async def push_combined(clients, combined_state, muted, last_combined_broadcast,
+                         last_status, force=False):
+    """Broadcast the OR-combined result when it changes.
+
+    `force` is for changes that alter the MEANING of the result without
+    necessarily changing its value - muting a node while both read EMPTY
+    still leaves EMPTY, but the dashboard has to learn that one node stopped
+    counting, otherwise the mute button appears to do nothing."""
+    overall = compute_combined(combined_state, muted)
+    if overall != last_combined_broadcast[0] or force:
+        last_combined_broadcast[0] = overall
+        await broadcast(clients, {"type": "combined", "prediction": overall,
+                                   "nodes": dict(combined_state),
+                                   "muted": sorted(muted)}, last_status)
+
+
 async def pump(out_queue, clients, model_bundle, last_status, control, node_id,
-                combined_state, last_combined_broadcast):
+                combined_state, last_combined_broadcast, muted):
     loop = asyncio.get_running_loop()
     clf = model_bundle["model"]
     n_expected = len(model_bundle["amp_columns"])
@@ -223,12 +251,9 @@ async def pump(out_queue, clients, model_bundle, last_status, control, node_id,
     last_frame_at = None
     marked_offline = False
 
-    async def broadcast_combined_if_changed():
-        overall = compute_combined(combined_state)
-        if overall != last_combined_broadcast[0]:
-            last_combined_broadcast[0] = overall
-            await broadcast(clients, {"type": "combined", "prediction": overall,
-                                       "nodes": dict(combined_state)}, last_status)
+    async def broadcast_combined_if_changed(force=False):
+        await push_combined(clients, combined_state, muted,
+                            last_combined_broadcast, last_status, force)
 
     async def set_offline(reason):
         """Take this node out of the combined vote (see compute_combined)."""
@@ -490,6 +515,7 @@ async def main_async(args, model_bundle):
 
     combined_state = {node_id: None for node_id, _ in nodes}
     last_combined_broadcast = [None]  # mutable box, shared across pump() tasks
+    muted = set()                      # node ids the operator has silenced
 
     stop_event = threading.Event()
     control = {node_id: {"recalibrate": False} for node_id, _ in nodes}
@@ -505,7 +531,7 @@ async def main_async(args, model_bundle):
         reader.start()
         tasks.append(asyncio.create_task(
             pump(out_queue, clients, model_bundle, last_status, control[node_id], node_id,
-                 combined_state, last_combined_broadcast)
+                 combined_state, last_combined_broadcast, muted)
         ))
 
     async def handler(ws):
@@ -535,6 +561,22 @@ async def main_async(args, model_bundle):
                         if t in control:
                             control[t]["recalibrate"] = True
                     print(f"[server] Recalibration requested by a client (node={target}).", flush=True)
+                elif msg.get("type") == "mute":
+                    target = msg.get("node")
+                    if target in control:
+                        if msg.get("muted"):
+                            muted.add(target)
+                        else:
+                            muted.discard(target)
+                        print(f"[server] Node {target} "
+                              f"{'MUTED' if target in muted else 'unmuted'} by a client "
+                              f"(it keeps streaming; it just stops voting).", flush=True)
+                        # force=True: muting while both nodes read EMPTY leaves
+                        # the combined value unchanged, but the dashboard still
+                        # has to learn that a node stopped counting.
+                        await push_combined(clients, combined_state, muted,
+                                            last_combined_broadcast, last_status,
+                                            force=True)
         finally:
             clients.discard(ws)
             print(f"Client disconnected ({len(clients)} total)")

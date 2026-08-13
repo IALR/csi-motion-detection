@@ -295,6 +295,31 @@
     padding: 3px 8px; cursor: pointer;
   }
   .node-view-btn.active { color: #fff; background: var(--series-1); border-color: var(--series-1); }
+
+  /* Mute: manual override for a node that is misbehaving. A muted node stays
+     fully visible and keeps streaming - only its vote is withdrawn - so the
+     styling dims the TILE without hiding any of its live data. */
+  .node-mute-btn {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 10px;
+    font-size: 11px; font-weight: 600; color: var(--text-secondary);
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 9px; cursor: pointer; width: 100%;
+    justify-content: center;
+  }
+  .node-mute-btn:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+  .node-mute-btn .icon { width: 13px; height: 13px; }
+  .node-tile.is-muted .node-mute-btn {
+    color: #fff; background: var(--warn); border-color: var(--warn);
+  }
+  /* Dim the readouts, not the whole tile, so live data stays legible. */
+  .node-tile.is-muted .node-status,
+  .node-tile.is-muted .node-meta { opacity: 0.55; }
+  .node-muted-flag {
+    display: none; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em;
+    text-transform: uppercase; color: var(--warn-text); background: var(--warn-bg);
+    border-radius: 4px; padding: 2px 6px; margin-bottom: 6px;
+  }
+  .node-tile.is-muted .node-muted-flag { display: inline-block; }
   .node-status { font-size: 13px; font-weight: 650; margin-bottom: 8px; }
   .node-status.moving { color: var(--critical); }
   .node-status.empty { color: var(--good); }
@@ -503,11 +528,17 @@
             <span class="node-name">Node A</span>
             <button class="node-view-btn active" data-node="A">Viewing</button>
           </div>
+          <span class="node-muted-flag" id="node-muted-flag-A">muted — not counted</span>
           <div class="node-status" id="node-status-A">warming up…</div>
           <dl class="meta-grid node-meta">
             <dt>RSSI</dt><dd class="mono" id="node-rssi-A">–</dd>
             <dt>Energy</dt><dd class="mono" id="node-energy-A">–</dd>
           </dl>
+          <button class="node-mute-btn" data-mute-node="A" id="mute-btn-A"
+                  title="Stop this node affecting the prediction above. It keeps streaming and stays visible — it just stops voting.">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="m23 9-6 6M17 9l6 6"/></svg>
+            <span>Mute this node</span>
+          </button>
         </div>
         <div class="node-tile node-b-hidden" id="tile-B" data-node="B">
           <div class="node-tile-head">
@@ -515,11 +546,17 @@
             <span class="node-name">Node B</span>
             <button class="node-view-btn" data-node="B">View</button>
           </div>
+          <span class="node-muted-flag" id="node-muted-flag-B">muted — not counted</span>
           <div class="node-status" id="node-status-B">warming up…</div>
           <dl class="meta-grid node-meta">
             <dt>RSSI</dt><dd class="mono" id="node-rssi-B">–</dd>
             <dt>Energy</dt><dd class="mono" id="node-energy-B">–</dd>
           </dl>
+          <button class="node-mute-btn" data-mute-node="B" id="mute-btn-B"
+                  title="Stop this node affecting the prediction above. It keeps streaming and stays visible — it just stops voting.">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="m23 9-6 6M17 9l6 6"/></svg>
+            <span>Mute this node</span>
+          </button>
         </div>
       </div>
     </section>
@@ -691,6 +728,8 @@ function makeNode(id) {
     discovered: false,
     noiseFloor: null,      // empty-room noise floor from this node's calibration
     noiseLevel: null,      // 'quiet' | 'moderate' | 'loud'
+    ampScale: null,        // mean received amplitude, for cross-node comparison
+    muted: false,          // operator has withdrawn this node's vote
   };
 }
 const nodes = { A: makeNode('A') };
@@ -940,6 +979,35 @@ document.querySelectorAll('[data-recal-node]').forEach(btn => {
     }
   });
 });
+
+// ---------------- Mute buttons (per node) ----------------
+// Manual, not automatic: because nodes are OR'd, one node throwing false
+// alarms makes the whole system throw them — and the noise reading cannot
+// reliably tell which node that is (two of this project's sessions had almost
+// identical noise floors but 0.7% vs 26% false alarms). The operator can see
+// which node is misbehaving; this lets them act on it without restarting.
+document.querySelectorAll('[data-mute-node]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const nodeId = btn.dataset.muteNode;
+    const node = getNode(nodeId);
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // Optimistic: reflect the click immediately, then let the server's
+    // 'combined' broadcast confirm it (that message is the source of truth).
+    node.muted = !node.muted;
+    applyMuteStyling(node);
+    ws.send(JSON.stringify({ type: 'mute', node: nodeId, muted: node.muted }));
+  });
+});
+
+function applyMuteStyling(node) {
+  const tile = document.getElementById(`tile-${node.id}`);
+  const btn = document.getElementById(`mute-btn-${node.id}`);
+  if (tile) tile.classList.toggle('is-muted', !!node.muted);
+  if (btn) {
+    const label = btn.querySelector('span');
+    if (label) label.textContent = node.muted ? 'Unmute this node' : 'Mute this node';
+  }
+}
 
 // ---------------- Message routing ----------------
 function handleMessage(msg) {
@@ -1192,16 +1260,21 @@ function onFrameInner(node, msg) {
 }
 
 // ---------------- Combined (OR'd) prediction -> the hero badge ----------------
-function describeCombined(nodeMap, overall) {
+function describeCombined(nodeMap, overall, mutedIds) {
   const ids = Object.keys(nodeMap);
-  if (ids.length <= 1) return null; // single-node mode: nothing extra to say
-  // Offline nodes are excluded from the server's vote, so they must be
-  // excluded from the description too - saying "confirmed empty by all 2
-  // nodes" while one of them is dead states more coverage than actually
-  // exists, which is the one thing a sensor readout must never do.
-  const live = ids.filter(id => nodeMap[id] !== 'OFFLINE');
-  const offline = ids.length - live.length;
-  const suffix = offline > 0 ? ` (${offline} offline)` : '';
+  if (ids.length <= 1 && !(mutedIds && mutedIds.size)) return null; // nothing extra to say
+  // Offline AND muted nodes are excluded from the server's vote, so they must
+  // be excluded from the description too - saying "confirmed empty by all 2
+  // nodes" while one of them is dead or silenced states more coverage than
+  // actually exists, which is the one thing a sensor readout must never do.
+  const muted = mutedIds || new Set();
+  const live = ids.filter(id => nodeMap[id] !== 'OFFLINE' && !muted.has(id));
+  const offline = ids.filter(id => nodeMap[id] === 'OFFLINE' && !muted.has(id)).length;
+  const parts = [];
+  if (offline > 0) parts.push(`${offline} offline`);
+  if (muted.size > 0) parts.push(`${muted.size} muted`);
+  const suffix = parts.length ? ` (${parts.join(', ')})` : '';
+  if (!live.length) return null;
   if (overall === 'MOVING') {
     const contributors = live.filter(id => nodeMap[id] === 'MOVING');
     return `confirmed by ${contributors.map(id => 'node ' + id).join(' + ')}${suffix}`;
@@ -1215,22 +1288,32 @@ function describeCombined(nodeMap, overall) {
 }
 
 function onCombined(msg) {
+  // The server owns mute state, so reconcile from every combined message -
+  // that keeps a second browser tab, or a reconnect, in sync rather than each
+  // page believing its own local clicks.
+  const mutedIds = new Set(msg.muted || []);
   Object.entries(msg.nodes).forEach(([id, prediction]) => {
     const node = getNode(id);
     node.confirmed = prediction;
+    node.muted = mutedIds.has(id);
+    applyMuteStyling(node);
     updateNodeTile(node);
   });
 
   const overall = msg.prediction; // 'EMPTY' | 'MOVING' | null
   const ids = Object.keys(msg.nodes);
-  const single = ids.length === 1 ? nodes[ids[0]] : null;
+  const voting = ids.filter(id => !mutedIds.has(id));
+  const single = voting.length === 1 ? nodes[voting[0]] : null;
 
   if (overall === null) {
-    setBadge('warming', 'warm', 'Warming up…', 'waiting for calibration to finish');
+    const why = ids.length && voting.length === 0
+      ? 'every node is muted or offline — nothing is being counted'
+      : 'waiting for calibration to finish';
+    setBadge('warming', 'warm', 'Warming up…', why);
     return;
   }
   const isMoving = overall === 'MOVING';
-  const note = describeCombined(msg.nodes, overall) ||
+  const note = describeCombined(msg.nodes, overall, mutedIds) ||
     (single && typeof single.confidence === 'number' ? `${Math.round(single.confidence * 100)}% confidence` : '');
   setBadge(isMoving ? 'moving' : 'empty', isMoving ? 'moving' : 'empty', overall, note,
             single ? single.confidence : undefined);
