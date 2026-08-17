@@ -85,11 +85,56 @@ static void ws_broadcast(const char *json)
 
 // ---------------------------------------------------------------- handlers --
 
+// A quick "is HTTP working at all" endpoint. Reaching /status in a browser
+// proves the network path and the server without involving WebSockets, which
+// separates "cannot reach the board" from "page loads but the socket fails" -
+// two faults that look identical from a stuck dashboard.
+static esp_err_t status_get_handler(httpd_req_t *req)
+{
+    csi_sa_status_t st;
+    csi_standalone_get_status(&st);
+    ESP_LOGI(TAG, "GET /status from fd %d", httpd_req_to_sockfd(req));
+    snprintf(s_json, sizeof(s_json),
+             "{\"ok\":true,\"state\":\"%s\",\"confirmed\":%d,\"confidence\":%.2f,"
+             "\"rssi\":%.0f,\"energy\":%.2f,\"noise\":%.4f,\"active\":%d,"
+             "\"ws_clients\":%d}",
+             st.state == CSI_SA_RUNNING ? "running"
+               : (st.state == CSI_SA_CALIBRATING ? "calibrating" : "warmup"),
+             st.confirmed, st.confidence, st.rssi, st.energy, st.noise_relative,
+             csi_standalone_active_count(), s_client_count);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, s_json, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t page_get_handler(httpd_req_t *req)
 {
+    // EMBED_FILES embeds RAW bytes with no null terminator (EMBED_TXTFILES is
+    // the one that appends one), so the length is end-start exactly. The
+    // earlier -1 here silently truncated the final byte of the page.
+    size_t total = (size_t)(dashboard_end - dashboard_start);
+    ESP_LOGI(TAG, "GET / from fd %d (%u bytes)", httpd_req_to_sockfd(req),
+             (unsigned)total);
+
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, (const char *)dashboard_start,
-                           dashboard_end - dashboard_start - 1);
+
+    // Sent in chunks rather than one 71KB write: a single send of that size
+    // has to fit the whole payload through lwip's socket buffers at once and
+    // can stall or fail on a small-memory stack. Chunked transfer is the
+    // normal way to serve anything sizeable from esp_http_server.
+    const size_t CHUNK = 4096;
+    for (size_t sent = 0; sent < total; sent += CHUNK) {
+        size_t n = (total - sent) < CHUNK ? (total - sent) : CHUNK;
+        if (httpd_resp_send_chunk(req, (const char *)dashboard_start + sent, n)
+                != ESP_OK) {
+            ESP_LOGW(TAG, "page send aborted at %u/%u bytes (client went away?)",
+                     (unsigned)sent, (unsigned)total);
+            httpd_resp_send_chunk(req, NULL, 0);   // terminate the response
+            return ESP_FAIL;
+        }
+    }
+    httpd_resp_send_chunk(req, NULL, 0);           // zero-length chunk = done
+    ESP_LOGI(TAG, "page sent (%u bytes)", (unsigned)total);
+    return ESP_OK;
 }
 
 static esp_err_t ws_handler(httpd_req_t *req)
@@ -97,6 +142,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (req->method == HTTP_GET) {
         // Handshake. Nothing to send yet - the periodic push loop will bring
         // this client up to date on its next tick.
+        ESP_LOGW(TAG, "WebSocket handshake from fd %d", httpd_req_to_sockfd(req));
         client_add(httpd_req_to_sockfd(req));
         return ESP_OK;
     }
@@ -285,15 +331,19 @@ esp_err_t csi_web_start(void)
     static const httpd_uri_t page = {
         .uri = "/", .method = HTTP_GET, .handler = page_get_handler,
     };
+    static const httpd_uri_t status = {
+        .uri = "/status", .method = HTTP_GET, .handler = status_get_handler,
+    };
     static const httpd_uri_t ws = {
         .uri = "/ws", .method = HTTP_GET, .handler = ws_handler,
         .is_websocket = true,
     };
     httpd_register_uri_handler(s_server, &page);
+    httpd_register_uri_handler(s_server, &status);
     httpd_register_uri_handler(s_server, &ws);
 
     xTaskCreate(web_push_task, "csi_web_push", 4096, NULL, 3, NULL);
     ESP_LOGW(TAG, "dashboard served on port 80 (%d bytes) - open the board's IP "
-                  "in a browser", (int)(dashboard_end - dashboard_start - 1));
+                  "in a browser", (int)(dashboard_end - dashboard_start));
     return ESP_OK;
 }
