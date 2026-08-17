@@ -279,14 +279,17 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(5000));
     start_ping();
 
+    // Arm detection BEFORE frames can arrive. csi_standalone_init() zeroes its
+    // whole state, and the printer task calls into that same state from
+    // another task - initialising after start_csi() left a window where a
+    // frame could be mid-flight through it while it was being wiped.
+    // It discards the first WARMUP_FRAMES regardless, because packets right
+    // after association are unrepresentative (rate adaptation and AGC still
+    // settling) and would bias the baseline everything is compared against.
+    csi_standalone_init();
+
     vTaskDelay(pdMS_TO_TICKS(1000));
     start_csi();
-
-    // Arm on-device detection only after CSI is actually flowing. It discards
-    // the first WARMUP_FRAMES anyway, because the packets right after
-    // association are unrepresentative (rate adaptation and AGC still
-    // settling) and would bias the baseline everything is later compared to.
-    csi_standalone_init();
 
     xTaskCreate(label_input_task, "label_input", 4096, NULL, 5, NULL);
 }

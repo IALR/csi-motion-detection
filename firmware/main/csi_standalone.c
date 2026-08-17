@@ -13,6 +13,10 @@ static const char *TAG = "csi_sa";
 // baseline biases every later comparison against it.
 #define WARMUP_FRAMES 30
 
+// How often to print a status line even when nothing changed, so there is
+// always visible evidence the detector is alive amid the CSI_AMP flood.
+#define STATUS_LOG_PERIOD_S 5.0f
+
 // Big buffers are static, not stack or heap: ~107KB total, which is
 // affordable against the ESP32-S3's SRAM but would blow any task stack.
 // (If the HTTP server later runs short of memory, these are the obvious
@@ -51,6 +55,7 @@ static struct {
     csi_noise_level_t noise_level;
     uint32_t         recal_count;
     int64_t          last_recal_us;
+    int64_t          last_log_us;
     bool             mismatch_warned;
     bool             subcarrier_mismatch;
     int              n_subcarriers;
@@ -224,10 +229,26 @@ void csi_standalone_on_frame(const float *amps, int n_sub, float rssi)
     s.confirmed = csi_smoother_update(&s.smoother, pred);
     s.confidence = s.smoother.vote_fraction;
 
-    if (s.confirmed != prev_confirmed && s.confirmed >= 0) {
-        ESP_LOGI(TAG, "%s (%.0f%% of last %d windows) | rssi %.0f | energy %.2f",
-                 s.confirmed == csi_classes[1] ? "MOVING" : "EMPTY",
-                 s.confidence * 100.0f, CSI_SMOOTH_SIZE, s.rssi, s.energy);
+    // Log on every state CHANGE, and also on a periodic heartbeat. The change
+    // log alone is nearly invisible in practice: each CSI_AMP line is ~750
+    // bytes at 10Hz, so a single line that only appears on a transition
+    // scrolls past instantly and a quiet room produces no output at all -
+    // leaving no way to tell "detecting, all empty" from "not running".
+    bool changed = (s.confirmed != prev_confirmed && s.confirmed >= 0);
+    int64_t now_us = esp_timer_get_time();
+    bool heartbeat = (now_us - s.last_log_us) >= (int64_t)(STATUS_LOG_PERIOD_S * 1000000);
+
+    if (changed || heartbeat) {
+        s.last_log_us = now_us;
+        const char *state = (s.confirmed < 0) ? "warming up"
+                          : (s.confirmed == csi_classes[1] ? "MOVING" : "EMPTY");
+        ESP_LOGW(TAG, "[%s] %s | vote %.0f%% | raw %s p=%.2f | rssi %.0f | "
+                      "energy %.2f | noise %.4f | recal %lu",
+                 changed ? "CHANGE" : "status", state,
+                 s.confidence * 100.0f,
+                 s.raw_prediction == csi_classes[1] ? "MOVING" : "EMPTY",
+                 s.raw_confidence, s.rssi, s.energy, s.noise_relative,
+                 (unsigned long)s.recal_count);
     }
 
     // Roll the baseline forward during sustained confirmed-empty stretches,
