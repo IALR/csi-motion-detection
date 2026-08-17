@@ -696,7 +696,23 @@ themeBtn.addEventListener('click', () => {
   applyTheme(next);
 });
 
-const WS_URL = "ws://localhost:8765";
+// Where to find the server, deduced from how this page was loaded, so ONE file
+// works in both deployments:
+//   opened as a local file (file://)  -> the Python server on this PC
+//   served over http://<host>/        -> that host, i.e. the ESP32 serving it
+//     itself, which is how the board runs standalone with no laptop.
+// Hardcoding localhost meant a page served by the board would still try to
+// reach the laptop. `?ws=` overrides both, for pointing a browser at a
+// specific node while debugging.
+const WS_URL = (() => {
+  const override = new URLSearchParams(location.search).get('ws');
+  if (override) return override;
+  if (location.protocol === 'http:' || location.protocol === 'https:') {
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${scheme}://${location.host}/ws`;
+  }
+  return "ws://localhost:8765";
+})();
 const HISTORY_ROWS = 150;
 const ENERGY_HISTORY = 250;
 const RING_R = 30;
