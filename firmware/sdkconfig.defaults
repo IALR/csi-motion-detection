@@ -1,0 +1,18 @@
+# Project defaults, applied whenever sdkconfig is regenerated.
+#
+# sdkconfig itself is a generated file: `idf.py fullclean` or a failed
+# reconfigure can rewrite it from Kconfig defaults, silently reverting hand
+# edits. Anything the project genuinely depends on belongs here instead, so it
+# survives. (This was learned the hard way - a manual flash-size edit was
+# reverted by a failed build and the next build still used 2MB.)
+
+# This board is an ESP32-S3 with 16MB flash and 8MB PSRAM, but the default
+# config assumed 2MB, which caps the app partition at ~1MB. The firmware was
+# already 774KB before the embedded Random Forest (430KB) and the self-test
+# vectors (180KB), so it no longer fits.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Custom table giving the app 4MB - see partitions.csv for the reasoning.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

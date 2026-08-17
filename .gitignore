@@ -31,3 +31,8 @@ csi_model_backup_*.joblib
 .idea/
 Thumbs.db
 .DS_Store
+# --- Generated C headers (regenerate with export_model_c.py /
+#     export_test_vectors.py; ~1.2MB of source that would bloat history on
+#     every retrain, and they are derived artefacts, not sources) ---
+firmware/main/csi_model_data.h
+firmware/main/csi_testvectors.h

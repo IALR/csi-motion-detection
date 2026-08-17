@@ -1,0 +1,16 @@
+# Custom partition table for the 16MB flash on this ESP32-S3.
+#
+# The default single-app table assumed 2MB and gave the app ~1MB. The firmware
+# was already 774KB before the embedded Random Forest (430KB) and test vectors
+# were added, so it no longer fits. This gives the app 4MB - roughly 4x what it
+# needs even with the model, leaving headroom for the web server and dashboard
+# without another table change later.
+#
+# Two OTA-capable app slots are deliberately NOT used: this device is flashed
+# over USB, and a single large factory partition is simpler and wastes less.
+#
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     0x9000,   0x6000
+phy_init,   data, phy,     0xf000,   0x1000
+factory,    app,  factory, 0x10000,  4M
+storage,    data, spiffs,  ,         1M

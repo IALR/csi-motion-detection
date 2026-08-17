@@ -19,6 +19,7 @@
 // committed. Copy wifi_secrets.h.example to wifi_secrets.h and fill in
 // your own network's SSID/password/router IP before building.
 #include "wifi_secrets.h"
+#include "csi_selftest.h"
 
 // ---- CSI plumbing ----
 #define MAX_CSI_BYTES   512   // covers HT40 (384 bytes) with margin
@@ -206,6 +207,17 @@ static void label_input_task(void *arg)
 // ---------------- Main ----------------
 void app_main(void)
 {
+    // Parity check first, before Wi-Fi brings any noise into the log. This
+    // replays real recorded windows through the on-device feature extraction
+    // and forest, and compares against what scikit-learn produced for those
+    // exact frames on the PC. If it fails, the port is wrong and nothing
+    // downstream can be trusted - so it is loud about it rather than
+    // continuing quietly into a subtly broken detector.
+    if (!csi_selftest_run()) {
+        ESP_LOGE(TAG, "Self-test FAILED - on-device inference is not trustworthy. "
+                      "Continuing to stream CSI so the PC pipeline still works.");
+    }
+
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
