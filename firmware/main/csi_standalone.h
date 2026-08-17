@@ -56,3 +56,16 @@ void csi_standalone_request_recalibration(void);
 
 // Snapshot of the current state, for logging and for the web server.
 void csi_standalone_get_status(csi_sa_status_t *out);
+
+// ---- for the web server ----------------------------------------------------
+// The dashboard's waterfall wants only the ACTIVE subcarriers: ~20 of the 128
+// are structurally dead guard bands that would draw as a permanent black
+// stripe. Which ones are active is decided once, from the first frame.
+int  csi_standalone_active_count(void);
+
+// Copy the latest frame's active-subcarrier amplitudes into `out` (which must
+// hold csi_standalone_active_count() floats) and return the frame sequence
+// number. The web task polls this rather than being called from the printer
+// task, so a slow or blocked socket can never delay serial output or the
+// detector itself.
+uint32_t csi_standalone_get_row(float *out, int max);

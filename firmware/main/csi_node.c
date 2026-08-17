@@ -21,6 +21,7 @@
 #include "wifi_secrets.h"
 #include "csi_selftest.h"
 #include "csi_standalone.h"
+#include "csi_web.h"
 
 // ---- CSI plumbing ----
 #define MAX_CSI_BYTES   512   // covers HT40 (384 bytes) with margin
@@ -57,6 +58,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGW(TAG, ">>> open http://" IPSTR "/ in a browser for the dashboard <<<",
+                 IP2STR(&event->ip_info.ip));
+        // Started here rather than in app_main because the HTTP server needs a
+        // live network interface. Guarded so a Wi-Fi reconnect does not try to
+        // start a second one.
+        static bool web_started = false;
+        if (!web_started && csi_web_start() == ESP_OK) {
+            web_started = true;
+        }
 
         // Capture the AP's BSSID so we can filter CSI to just our AP.
         wifi_ap_record_t ap;

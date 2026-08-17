@@ -23,3 +23,7 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # arrays are now static, which removes ~3.4KB of that, but headroom here is
 # cheap insurance given how much float work runs per window.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# The board serves the dashboard itself over HTTP + WebSocket; WS support in
+# esp_http_server is off by default.
+CONFIG_HTTPD_WS_SUPPORT=y

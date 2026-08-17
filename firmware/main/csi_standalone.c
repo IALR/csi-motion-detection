@@ -59,6 +59,15 @@ static struct {
     bool             mismatch_warned;
     bool             subcarrier_mismatch;
     int              n_subcarriers;
+
+    // Latest frame, reduced to the ACTIVE subcarriers, for the dashboard's
+    // waterfall. Published with a sequence number so the web task can poll
+    // and detect new frames without being called from the printer task.
+    int              active_idx[CSI_NS];
+    int              active_count;
+    bool             active_known;
+    float            latest_row[CSI_NS];
+    uint32_t         row_seq;
 } s;
 
 static float g_features[CSI_N_FEATURES];
@@ -145,6 +154,24 @@ void csi_standalone_on_frame(const float *amps, int n_sub, float rssi)
     }
 
     s.rssi = rssi;
+
+    // Decide the active set once, from the first good frame: the ~20 dead
+    // guard-band subcarriers sit at exactly zero and would draw as a permanent
+    // black stripe in the waterfall. Falls back to all of them if a frame
+    // somehow arrives entirely zero.
+    if (!s.active_known) {
+        s.active_count = 0;
+        for (int i = 0; i < CSI_NS; i++) {
+            if (amps[i] > 0.0f) s.active_idx[s.active_count++] = i;
+        }
+        if (s.active_count == 0) {
+            for (int i = 0; i < CSI_NS; i++) s.active_idx[i] = i;
+            s.active_count = CSI_NS;
+        }
+        s.active_known = true;
+    }
+    for (int i = 0; i < s.active_count; i++) s.latest_row[i] = amps[s.active_idx[i]];
+    s.row_seq++;
 
     // Frame-to-frame amplitude change, the same quantity the dashboard plots.
     if (s.have_prev) {
@@ -263,4 +290,17 @@ void csi_standalone_on_frame(const float *amps, int n_sub, float rssi)
                      (unsigned long)s.recal_count, s.noise_relative);
         }
     }
+}
+
+int csi_standalone_active_count(void)
+{
+    return s.active_known ? s.active_count : 0;
+}
+
+uint32_t csi_standalone_get_row(float *out, int max)
+{
+    if (!out || !s.active_known) return 0;
+    int n = s.active_count < max ? s.active_count : max;
+    memcpy(out, s.latest_row, sizeof(float) * (size_t)n);
+    return s.row_seq;
 }
