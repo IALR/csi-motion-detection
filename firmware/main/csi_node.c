@@ -20,6 +20,7 @@
 // your own network's SSID/password/router IP before building.
 #include "wifi_secrets.h"
 #include "csi_selftest.h"
+#include "csi_standalone.h"
 
 // ---- CSI plumbing ----
 #define MAX_CSI_BYTES   512   // covers HT40 (384 bytes) with margin
@@ -138,6 +139,12 @@ static void csi_print_task(void *arg)
                         "CSI_AMP,%lld,%d,%d,%d",
                         (long long)item.ts_us, item.label, n, (int)item.rssi);
 
+        // Amplitudes are kept as floats alongside the printed integers so the
+        // on-device detector scores exactly the values that go out over serial
+        // - the SAME numbers the PC pipeline receives, not a separately
+        // computed variant that could drift from them.
+        static float amp_f[MAX_CSI_BYTES / 2];
+        int kept = 0;
         for (int i = 0; i < n; i++) {
             int8_t imag = item.buf[i * 2];
             int8_t real = item.buf[i * 2 + 1];
@@ -147,10 +154,25 @@ static void csi_print_task(void *arg)
                 break;
             }
             off += w;
+            if (kept < (int)(sizeof(amp_f) / sizeof(amp_f[0]))) {
+                amp_f[kept++] = (float)amp;
+            }
         }
 
         // Raw printf (no ESP_LOG prefix/color) = fewer UART bytes per frame.
+        // This stays FIRST and unchanged: the serial stream is what
+        // csi_live_server.py and the collector consume, and standalone
+        // detection must never be able to disturb or delay it.
         printf("%s\n", line);
+
+        // Then score the same frame on-device. Done here rather than in a
+        // separate task because it is cheap next to the UART write: ~200 trees
+        // x ~20 levels is well under a millisecond, against ~65ms to shift a
+        // 750-byte line out at 115200 baud. Only fully-formatted frames are
+        // scored, so a truncated line never reaches the model.
+        if (kept == n) {
+            csi_standalone_on_frame(amp_f, n, (float)item.rssi);
+        }
 
         // Occasionally report dropped-frame count so you can see if the
         // UART is the bottleneck (raise the console baud if drops climb).
@@ -248,13 +270,23 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to create CSI queue");
         return;
     }
-    xTaskCreate(csi_print_task, "csi_print", 4096, NULL, 4, NULL);
+    // 6144 rather than 4096: this task now also runs feature extraction and
+    // the forest. The heavy scratch buffers in csi_features.c are static so
+    // most of that cost is gone, but the earlier boot-loop was exactly this
+    // mistake made on the main task, so leave headroom here too.
+    xTaskCreate(csi_print_task, "csi_print", 6144, NULL, 4, NULL);
 
     vTaskDelay(pdMS_TO_TICKS(5000));
     start_ping();
 
     vTaskDelay(pdMS_TO_TICKS(1000));
     start_csi();
+
+    // Arm on-device detection only after CSI is actually flowing. It discards
+    // the first WARMUP_FRAMES anyway, because the packets right after
+    // association are unrepresentative (rate adaptation and AGC still
+    // settling) and would bias the baseline everything is later compared to.
+    csi_standalone_init();
 
     xTaskCreate(label_input_task, "label_input", 4096, NULL, 5, NULL);
 }
