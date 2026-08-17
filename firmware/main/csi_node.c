@@ -272,6 +272,29 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Force this station's link to 20MHz.
+    //
+    // The number of CSI subcarriers is set by the channel width: 20MHz gives
+    // 128, 40MHz gives 192. The model is built on 128, so a 40MHz link makes
+    // every feature vector the wrong shape and detection stops dead. This
+    // project has been broken by exactly that three times, always because the
+    // access point renegotiated width on its own - a phone hotspot offers no
+    // setting to prevent it, and previously the only suggested fix was to buy
+    // a different router.
+    //
+    // Pinning it here is the real fix: the STA advertises 20MHz only, so the
+    // AP cannot pull the link up to 40MHz whatever it decides to do. Non-fatal
+    // if it fails - the mismatch is still detected and reported downstream.
+    esp_err_t bw = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW20);
+    if (bw == ESP_OK) {
+        ESP_LOGI(TAG, "link pinned to 20MHz (keeps CSI at 128 subcarriers)");
+    } else {
+        ESP_LOGW(TAG, "could not pin 20MHz: %s - the AP may still negotiate "
+                      "40MHz, which yields 192 subcarriers and disables detection",
+                 esp_err_to_name(bw));
+    }
+
     ESP_LOGI(TAG, "WiFi init done, connecting...");
 
     // Queue + printer task BEFORE enabling CSI so no frame is lost.
