@@ -1344,6 +1344,81 @@ not quote one until `train_zone_model.py` has actually run.
 
 ---
 
+## 27. Running the model on the ESP32 itself (no laptop)
+
+**Why asked:** the user wanted the detector to run standalone on the board
+rather than depending on a PC for computation.
+
+**Training stays on the PC.** Only inference moved. Record, run
+`train_model.py`, export, flash. That is the normal split for embedded ML and
+avoids pretending the board can retrain itself.
+
+**Feasibility, measured before writing any code:**
+- The full 200-tree forest packs to **430KB**, and this board turned out to
+  have **16MB flash and 8MB PSRAM** (the sdkconfig said 2MB - a default, not
+  the hardware). At 2.6% of flash there was no reason to shrink the model, so
+  the board runs *exactly* what the PC validated. For reference had it been a
+  2MB part: 25 trees costs 0.67pp (0.9358 vs 0.9425) for 8x less space.
+- Runtime RAM is trivial: ~6KB for the window buffer, baseline and features.
+- **float32 was the main risk and it evaporated**: across all 3302 recorded
+  windows, float32 vs float64 changed **zero** predictions, despite 2.7% of
+  windows sitting within 0.10 of the decision boundary. Relative feature drift
+  is 6e-8, far below what a tree threshold resolves.
+
+**Export format** (`export_model_c.py`): four parallel arrays rather than an
+array of structs, because `{int16, float, int16, int16}` is 10 bytes that the
+compiler pads to 12, wasting ~85KB over 44k nodes. Leaves store a
+**probability**, not a label: sklearn averages each tree's probability
+distribution then takes argmax, which differs from a hard majority vote
+whenever trees are impure. An exact 0.5 tie resolves to class 0, matching
+argmax's first-maximum rule. Verified by replaying every recorded window
+through a simulation of the generated C: **3302/3302 identical to sklearn**.
+
+**Verification on the device, not the host.** There is no host C compiler on
+this machine, so `csi_selftest.c` embeds real recorded frames plus the PC's
+answers and recomputes baseline, features and prediction from scratch at boot.
+This turned out to be the stronger choice - it exercises the real FPU and the
+real xtensa compiler. Result: **12/12 predictions matching, 266/266 features
+in tolerance on every vector**. One vector is a window the model gets *wrong*,
+and the device reproduces the same wrong answer - which is the point: this
+tests fidelity to the PC, not to truth.
+
+**Three bugs, and which method caught each - worth noting for future ports:**
+1. *Found by reading*: scratch buffers sized for an 8-frame scoring window
+   while the same function is also called with the 100-frame calibration
+   block.
+2. *Found by compiling*: the exporters emitted `20f` for whole numbers, an
+   integer constant with a float suffix. CSI amplitudes are integers and leaf
+   probabilities are frequently exactly 0 or 1, so this was immediate.
+3. *Found ONLY on real hardware*: a main-task stack overflow that boot-looped
+   the board **after the parity test had already passed**. One feature
+   computation wanted ~3.4KB of stack against FreeRTOS's 3584-byte default.
+   The scratch arrays are now `static` (documented as making the file
+   non-reentrant - only one task runs inference) and the stack was raised to
+   8192. A host-compiled test would have sailed through this: desktop stacks
+   are megabytes.
+
+**Flash configuration gotcha**: `sdkconfig` is a *generated* file. A hand edit
+of the flash size was silently reverted by a failed build, and the next build
+still used 2MB. Project-critical settings now live in `sdkconfig.defaults`
+(16MB flash, custom 4MB app partition via `partitions.csv`, larger main task
+stack), which survives regeneration.
+
+**Confirmed working end to end**: self-test PASS, no crash, Wi-Fi connected,
+ping trigger running, `CSI_AMP` streaming. Image is 1.27MB with 68% of the
+app partition free.
+
+**Not yet built** (the board still only streams; the PC still does the live
+serving): the on-device calibration state machine with a "leave the room"
+trigger, an HTTP + WebSocket server so a phone can see the result without a
+laptop, and ESP-NOW peer-to-peer so the second board's state reaches the first
+for the OR combination. The generated headers `csi_model_data.h` and
+`csi_testvectors.h` are gitignored - they are derived artefacts and would add
+~1.2MB to history on every retrain. Regenerate with `export_model_c.py` and
+`export_test_vectors.py`.
+
+---
+
 ## Working style notes for whoever picks this up
 
 - The user wants concrete numbers and real diagnosis, not reassurance. When
