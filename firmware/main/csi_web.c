@@ -268,6 +268,7 @@ static void web_push_task(void *arg)
     int last_confirmed = -2;
     uint32_t last_seq = 0, last_recal = 0;
     bool init_sent = false;
+    bool mismatch_sent = false;
     int active = 0;
 
     while (1) {
@@ -277,6 +278,34 @@ static void web_push_task(void *arg)
         csi_sa_status_t st;
         csi_standalone_get_status(&st);
         active = csi_standalone_active_count();
+
+        // A mismatched stream blocks everything downstream - no active set is
+        // ever decided, so no init, so the push loop below would send nothing
+        // whatsoever and the dashboard would sit on "waiting" with no reason
+        // given. Tell the page instead: silent degradation is the exact fault
+        // that was fixed in the Python server and it reappeared here.
+        if (st.subcarrier_mismatch) {
+            if (!mismatch_sent) {
+                mismatch_sent = true;
+                snprintf(s_json, sizeof(s_json),
+                         "{\"type\":\"warning\",\"node\":\"" NODE_ID "\","
+                         "\"message\":\"Stream has %d subcarriers, model expects %d "
+                         "- detection disabled until it matches. The access point "
+                         "changed channel width (40MHz gives 192, 20MHz gives 128); "
+                         "a 20MHz-only AP is required.\"}",
+                         st.n_subcarriers, CSI_NS);
+                ws_broadcast(s_json);
+            }
+            continue;
+        }
+        if (mismatch_sent) {
+            mismatch_sent = false;
+            snprintf(s_json, sizeof(s_json),
+                     "{\"type\":\"warning\",\"node\":\"" NODE_ID "\","
+                     "\"message\":\"\"}");   // empty message clears the banner
+            ws_broadcast(s_json);
+            init_sent = false;                  // re-init: the width changed
+        }
 
         if (!init_sent && active > 0) {
             send_init();
