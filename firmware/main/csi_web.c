@@ -313,6 +313,18 @@ static void web_push_task(void *arg)
     }
 }
 
+// Anything the server rejects gets logged with its URI. Without this a
+// mistyped or unmatched path (notably the /ws upgrade) fails invisibly: the
+// browser just shows a dead socket and the console shows nothing at all.
+static esp_err_t not_found_handler(httpd_req_t *req, httpd_err_code_t err)
+{
+    ESP_LOGE(TAG, "404 for \"%s\" (method %d) from fd %d - the browser asked for "
+                  "something no handler is registered for",
+             req->uri, req->method, httpd_req_to_sockfd(req));
+    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such path");
+    return ESP_FAIL;
+}
+
 // ------------------------------------------------------------------- start --
 
 esp_err_t csi_web_start(void)
@@ -341,6 +353,7 @@ esp_err_t csi_web_start(void)
     httpd_register_uri_handler(s_server, &page);
     httpd_register_uri_handler(s_server, &status);
     httpd_register_uri_handler(s_server, &ws);
+    httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, not_found_handler);
 
     xTaskCreate(web_push_task, "csi_web_push", 4096, NULL, 3, NULL);
     ESP_LOGW(TAG, "dashboard served on port 80 (%d bytes) - open the board's IP "
