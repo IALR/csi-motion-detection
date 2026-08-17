@@ -7,6 +7,20 @@
 #include <stdlib.h>   // qsort
 #include <string.h>
 
+// NOT REENTRANT, deliberately.
+//
+// The scratch arrays below are `static` rather than local because as locals
+// they needed ~3.4KB of stack for one feature computation (five 128-float
+// arrays in csi_calibrate_features plus two 100-float arrays in
+// raw_window_stats), against FreeRTOS's 3584-byte default main task stack.
+// That overflowed and boot-looped the board on the very first flash - after
+// the parity self-test had already passed, so the maths was right and only
+// the memory placement was wrong.
+//
+// Only one task ever runs inference, so sharing them is safe. If a second
+// task is ever added that calls into this file, these must become per-task
+// buffers or be guarded by a mutex.
+
 // ---------------------------------------------------------------- helpers --
 
 static float mean_f(const float *v, int n)
@@ -57,7 +71,7 @@ static float percentile_asc(const float *sorted_asc, int n, float pct)
 
 static float median_f(const float *v, int n)
 {
-    float tmp[CSI_NS];
+    static float tmp[CSI_NS];
     memcpy(tmp, v, sizeof(float) * (size_t)n);
     // ascending sort via the descending comparator, then read backwards
     qsort(tmp, (size_t)n, sizeof(float), cmp_desc);
@@ -73,7 +87,7 @@ void csi_raw_window_stats(const float *amps, const float *rssi, int n_frames,
 {
     // Sized for the CALIBRATION block, not just a scoring window - this same
     // function computes both, and a baseline is 100 frames against a window's 8.
-    float col[CSI_MAX_FRAMES];
+    static float col[CSI_MAX_FRAMES];
 
     for (int sc = 0; sc < CSI_NS; sc++) {
         for (int f = 0; f < n_frames; f++) col[f] = amps[f * CSI_NS + sc];
@@ -86,7 +100,7 @@ void csi_raw_window_stats(const float *amps, const float *rssi, int n_frames,
     // change; then mean/std over the window's n-1 pairs. With a single frame
     // Python yields array([0.0]), i.e. mean 0 and std 0.
     if (n_frames > 1) {
-        float diffs[CSI_MAX_FRAMES];   // n_frames-1 used; sized for calibration
+        static float diffs[CSI_MAX_FRAMES];  // n_frames-1 used; sized for calibration
         for (int f = 1; f < n_frames; f++) {
             float acc = 0.0f;
             for (int sc = 0; sc < CSI_NS; sc++) {
@@ -135,8 +149,8 @@ void csi_compute_baseline(const float *amps, const float *rssi, int n_frames,
 void csi_calibrate_features(const csi_stats_t *s, const csi_baseline_t *b,
                             float *fv)
 {
-    float std_ratio[CSI_NS];
-    float abs_delta[CSI_NS];
+    static float std_ratio[CSI_NS];
+    static float abs_delta[CSI_NS];
 
     for (int i = 0; i < CSI_NS; i++) {
         float delta = s->amp_mean[i] - b->amp_mean[i];
@@ -161,7 +175,7 @@ void csi_calibrate_features(const csi_stats_t *s, const csi_baseline_t *b,
 
     // Order-invariant summaries: "is SOMETHING in the band disturbed", without
     // caring which index - these are what let the model transfer between rooms.
-    float sr_desc[CSI_NS], ad_desc[CSI_NS];
+    static float sr_desc[CSI_NS], ad_desc[CSI_NS];
     memcpy(sr_desc, std_ratio, sizeof(sr_desc));
     memcpy(ad_desc, abs_delta, sizeof(ad_desc));
     qsort(sr_desc, CSI_NS, sizeof(float), cmp_desc);
@@ -177,7 +191,7 @@ void csi_calibrate_features(const csi_stats_t *s, const csi_baseline_t *b,
     for (int i = 0; i < CSI_NS; i++) if (std_ratio[i] > CSI_ELEVATED_RATIO) elevated++;
 
     // percentile_asc expects ascending; sr_desc is descending, so mirror it.
-    float sr_asc[CSI_NS];
+    static float sr_asc[CSI_NS];
     for (int i = 0; i < CSI_NS; i++) sr_asc[i] = sr_desc[CSI_NS - 1 - i];
 
     fv[k + 4] = sr_desc[0];                                   // std_ratio_max

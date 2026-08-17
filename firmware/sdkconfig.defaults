@@ -16,3 +16,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 # Custom table giving the app 4MB - see partitions.csv for the reasoning.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Feature extraction and inference need noticeably more stack than the 3584-byte
+# default: the first flash boot-looped on a main-task stack overflow (the parity
+# self-test itself passed, so only the memory placement was wrong). The scratch
+# arrays are now static, which removes ~3.4KB of that, but headroom here is
+# cheap insurance given how much float work runs per window.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
