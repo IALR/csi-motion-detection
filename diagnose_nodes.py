@@ -65,6 +65,14 @@ def collect(port, baud, seconds, out, node_id, warmup):
     diagnosis, and discarding it leaves nothing to go on."""
     try:
         ser = serial.Serial(port, baud, timeout=0.1)
+        # ESP32 dev boards wire RTS to EN (reset) and DTR to GPIO0. An
+        # asserted RTS - which exiting `idf.py monitor` can leave behind -
+        # holds the chip in reset: the port opens fine and the board sends
+        # nothing, indistinguishable from a wrong port or dead device.
+        ser.dtr = False
+        ser.rts = True
+        time.sleep(0.05)
+        ser.rts = False
     except serial.SerialException as e:
         out["error"] = f"could not open {port}: {e}"
         out["hint"] = ("Another program is probably holding it - the live server, "

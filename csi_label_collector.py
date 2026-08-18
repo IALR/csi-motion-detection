@@ -175,6 +175,14 @@ class NodeRecorder:
         self.amplitude_count = amplitude_count
         os.makedirs(out_dir, exist_ok=True)
         self.ser = serial.Serial(port, baud, timeout=0)
+        # ESP32 dev boards wire RTS to EN (reset) and DTR to GPIO0. An asserted
+        # RTS - which exiting `idf.py monitor` can leave behind - holds the chip
+        # in reset: the port opens fine and the board sends nothing, which looks
+        # exactly like a wrong port or an unpowered device.
+        self.ser.dtr = False
+        self.ser.rts = True
+        time.sleep(0.05)
+        self.ser.rts = False
         self.ser.reset_input_buffer()
         self._rx = ""
         self._all_path = os.path.join(out_dir, "all_csi_data.csv")

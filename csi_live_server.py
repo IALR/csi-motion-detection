@@ -75,6 +75,19 @@ def serial_reader_thread(port, baud, out_queue, stop_event, node_id):
     while not stop_event.is_set():
         try:
             ser = serial.Serial(port, baud, timeout=0.1)
+            # ESP32 dev boards wire the USB bridge's RTS to EN (reset) and DTR
+            # to GPIO0 (boot select). Whatever state the previous program left
+            # those lines in is inherited here, and an asserted RTS holds the
+            # chip in RESET - so the port opens perfectly, the board runs
+            # nothing, and it looks identical to "wrong COM port / device not
+            # powered". Exiting `idf.py monitor` is enough to leave it that
+            # way. Deasserting both, then pulsing EN, guarantees the board is
+            # actually running rather than silently held down.
+            ser.dtr = False
+            ser.rts = True          # assert EN low = hold in reset
+            time.sleep(0.05)
+            ser.rts = False         # release: the board boots from here
+            ser.reset_input_buffer()
         except serial.SerialException as e:
             if not announced_open:
                 # Only report the first failure of a streak, otherwise a port
