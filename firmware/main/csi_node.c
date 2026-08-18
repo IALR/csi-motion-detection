@@ -37,6 +37,16 @@ static volatile uint32_t frames_dropped = 0;  // queue-full drops
 static uint8_t s_ap_bssid[6];
 static volatile bool s_have_bssid = false;
 
+// The gateway address from our own DHCP lease. CSI is only produced when
+// packets actually arrive, and the firmware generates that traffic by pinging
+// the router - so the ping target must be reachable or NO CSI is produced at
+// all. Hardcoding it in wifi_secrets.h has silently broken this project three
+// times: the board boots, joins Wi-Fi, reports "CSI enabled", and then emits
+// nothing, because the network handed out a different subnet since the
+// address was written down. Taking it from the lease makes that impossible.
+static esp_ip4_addr_t s_gateway;
+static volatile bool  s_have_gateway = false;
+
 typedef struct {
     int64_t ts_us;
     int     label;
@@ -58,6 +68,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        s_gateway = event->ip_info.gw;
+        s_have_gateway = true;
+        ESP_LOGI(TAG, "gateway " IPSTR " (CSI ping target)", IP2STR(&event->ip_info.gw));
         ESP_LOGW(TAG, ">>> open http://" IPSTR "/ in a browser for the dashboard <<<",
                  IP2STR(&event->ip_info.ip));
         // Started here rather than in app_main because the HTTP server needs a
@@ -87,7 +100,21 @@ static void start_ping(void)
     ping_config.count = 0;               // run forever
     ping_config.interval_ms = 100;       // ~10 Hz CSI trigger
     ping_config.task_stack_size = 4096;
-    ipaddr_aton(ROUTER_IP, &ping_config.target_addr);
+    // Prefer the gateway from our own DHCP lease over the compiled-in
+    // ROUTER_IP: the lease is always right, whereas the constant goes stale
+    // the moment the network changes. ROUTER_IP remains the fallback for a
+    // setup with no usable gateway, or to deliberately ping something else.
+    if (s_have_gateway) {
+        ip_addr_t target = { 0 };
+        target.type = IPADDR_TYPE_V4;
+        target.u_addr.ip4.addr = s_gateway.addr;
+        ping_config.target_addr = target;
+        ESP_LOGI(TAG, "ping target " IPSTR " (from DHCP lease)", IP2STR(&s_gateway));
+    } else {
+        ipaddr_aton(ROUTER_IP, &ping_config.target_addr);
+        ESP_LOGW(TAG, "no DHCP gateway yet - falling back to ROUTER_IP %s. If this "
+                      "is not reachable, NO CSI will be produced at all.", ROUTER_IP);
+    }
 
     // No per-reply callback: logging every ping floods the UART and
     // competes with the CSI stream for bandwidth.
