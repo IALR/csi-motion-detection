@@ -32,8 +32,8 @@ extern const uint8_t dashboard_end[]   asm("_binary_csi_dashboard_html_end");
 #define NODE_ID "A"
 
 static httpd_handle_t s_server = NULL;
-static int  s_clients[MAX_WS_CLIENTS];
-static int  s_client_count = 0;
+static int  s_client_count = 0;   // last observed, for /status
+static bool s_send_warned = false;
 
 // One shared buffer: a frame message carries ~108 numbers, and building it on
 // a task stack would be another needless kilobyte or two of stack pressure.
@@ -41,46 +41,69 @@ static int  s_client_count = 0;
 static char s_json[3072];
 static float s_row[CSI_NS];
 
-static void client_add(int fd)
+// Rather than maintaining a list of connected sockets by hand, ask the server
+// who is actually connected, every time.
+//
+// The hand-rolled version was wrong in a way that produced exactly the symptom
+// seen: the browser reported "Connected" while /status reported ws_clients 0
+// and no frames ever arrived. A single failed async send removed the client
+// from the local list permanently, even though the socket was still perfectly
+// open - after which nothing was ever sent to it again, and there was no path
+// back. Enumerating the server's own list has no such state to get wrong.
+static int ws_send_to_all(const char *json)
 {
-    for (int i = 0; i < s_client_count; i++) if (s_clients[i] == fd) return;
-    if (s_client_count < MAX_WS_CLIENTS) {
-        s_clients[s_client_count++] = fd;
-        ESP_LOGI(TAG, "client connected (fd %d, %d total)", fd, s_client_count);
-    } else {
-        ESP_LOGW(TAG, "client limit (%d) reached, refusing fd %d", MAX_WS_CLIENTS, fd);
-    }
-}
+    if (!s_server) return 0;
 
-static void client_remove(int fd)
-{
-    for (int i = 0; i < s_client_count; i++) {
-        if (s_clients[i] == fd) {
-            s_clients[i] = s_clients[--s_client_count];
-            ESP_LOGI(TAG, "client gone (fd %d, %d left)", fd, s_client_count);
-            return;
-        }
-    }
-}
+    int  fds[MAX_WS_CLIENTS + 4];
+    size_t count = sizeof(fds) / sizeof(fds[0]);
+    if (httpd_get_client_list(s_server, &count, fds) != ESP_OK) return 0;
 
-static void ws_broadcast(const char *json)
-{
-    if (!s_server || s_client_count == 0) return;
     httpd_ws_frame_t frame = {
         .final = true,
         .fragmented = false,
         .type = HTTPD_WS_TYPE_TEXT,
         .payload = (uint8_t *)json,
-        .len = strlen(json),
+        .len = json ? strlen(json) : 0,
     };
-    // Iterate backwards: a failed send removes that client, which swaps the
-    // last entry into its slot, and a forward loop would skip the moved one.
-    for (int i = s_client_count - 1; i >= 0; i--) {
-        int fd = s_clients[i];
-        if (httpd_ws_send_frame_async(s_server, fd, &frame) != ESP_OK) {
-            client_remove(fd);
+
+    int sent = 0;
+    for (size_t i = 0; i < count; i++) {
+        // Skip plain HTTP sockets: the page fetch itself shows up here too.
+        if (httpd_ws_get_fd_info(s_server, fds[i]) != HTTPD_WS_CLIENT_WEBSOCKET) {
+            continue;
+        }
+        esp_err_t err = httpd_ws_send_frame_async(s_server, fds[i], &frame);
+        if (err == ESP_OK) {
+            sent++;
+        } else if (!s_send_warned) {
+            // Once only - a broken socket would otherwise log 10x a second.
+            s_send_warned = true;
+            ESP_LOGW(TAG, "ws send to fd %d failed: %s", fds[i], esp_err_to_name(err));
         }
     }
+    if (sent > 0) s_send_warned = false;
+    s_client_count = sent;      // what /status reports
+    return sent;
+}
+
+static void ws_broadcast(const char *json)
+{
+    ws_send_to_all(json);
+}
+
+// How many WebSocket clients are attached right now.
+static int ws_client_count(void)
+{
+    if (!s_server) return 0;
+    int  fds[MAX_WS_CLIENTS + 4];
+    size_t count = sizeof(fds) / sizeof(fds[0]);
+    if (httpd_get_client_list(s_server, &count, fds) != ESP_OK) return 0;
+    int n = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (httpd_ws_get_fd_info(s_server, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) n++;
+    }
+    s_client_count = n;
+    return n;
 }
 
 // ---------------------------------------------------------------- handlers --
@@ -143,7 +166,6 @@ static esp_err_t ws_handler(httpd_req_t *req)
         // Handshake. Nothing to send yet - the periodic push loop will bring
         // this client up to date on its next tick.
         ESP_LOGW(TAG, "WebSocket handshake from fd %d", httpd_req_to_sockfd(req));
-        client_add(httpd_req_to_sockfd(req));
         return ESP_OK;
     }
 
@@ -154,7 +176,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (ret != ESP_OK) return ret;
 
     if (frame.type == HTTPD_WS_TYPE_CLOSE) {
-        client_remove(httpd_req_to_sockfd(req));
+        ESP_LOGI(TAG, "client closed (fd %d)", httpd_req_to_sockfd(req));
         return ESP_OK;
     }
     if (frame.type != HTTPD_WS_TYPE_TEXT) return ESP_OK;
@@ -273,7 +295,7 @@ static void web_push_task(void *arg)
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(100));
-        if (s_client_count == 0) { init_sent = false; last_state = (csi_sa_state_t)-1; continue; }
+        if (ws_client_count() == 0) { init_sent = false; last_state = (csi_sa_state_t)-1; continue; }
 
         csi_sa_status_t st;
         csi_standalone_get_status(&st);
