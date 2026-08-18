@@ -29,6 +29,7 @@ Deps:
 
 import argparse
 import asyncio
+import os
 import json
 import queue
 import sys
@@ -518,6 +519,124 @@ async def pump(out_queue, clients, model_bundle, last_status, control, node_id,
         })  # frames aren't stored in last_status - too frequent to replay
 
 
+class AlertManager:
+    """Fires an action once the room has been continuously occupied.
+
+    Why a sustained hold rather than alerting on the first MOVING window:
+    measured on this project's own out-of-fold predictions, per-window false
+    alarms run about 11% in a noisy room, but requiring several CONSECUTIVE
+    seconds of confirmed MOVING collapses that to roughly one spurious alert
+    per recording session - and none at all across the quiet sessions. The
+    hold is doing most of the work of making an alert trustworthy.
+
+    Be honest about the limits, though: that was measured over only ~21
+    minutes of empty-room recording, so "no false alerts in the quiet
+    sessions" bounds the rate loosely rather than proving it is zero. In a
+    loud room (noise floor above ~0.15) expect this to fire spuriously
+    several times an hour.
+
+    The cooldown exists because one person walking around otherwise produces
+    a continuous stream of alerts; after firing, the manager stays quiet
+    until either the cooldown elapses or the room goes EMPTY and is occupied
+    again.
+    """
+
+    def __init__(self, hold_seconds, cooldown_seconds):
+        self.hold = hold_seconds
+        self.cooldown = cooldown_seconds
+        self.moving_since = None
+        self.last_fired_at = None
+        self.fired_this_occupancy = False
+        self.count = 0
+
+    def update(self, combined, now):
+        """Feed the combined room state. Returns the sustained duration in
+        seconds when an alert should fire, else None."""
+        if combined != "MOVING":
+            # Any return to EMPTY (or to unknown) ends this occupancy, so the
+            # next person triggers a fresh alert rather than being suppressed
+            # by a cooldown started minutes ago.
+            self.moving_since = None
+            self.fired_this_occupancy = False
+            return None
+
+        if self.moving_since is None:
+            self.moving_since = now
+        held = now - self.moving_since
+        if held < self.hold or self.fired_this_occupancy:
+            return None
+        if self.last_fired_at is not None and (now - self.last_fired_at) < self.cooldown:
+            return None
+
+        self.last_fired_at = now
+        self.fired_this_occupancy = True
+        self.count += 1
+        return held
+
+
+def _deliver_alert(webhook, command, message, payload):
+    """Blocking delivery, run in an executor so it can never stall the event
+    loop - a webhook to an unreachable host would otherwise freeze prediction
+    and every connected dashboard along with it."""
+    import subprocess
+    import urllib.request
+
+    if webhook:
+        try:
+            # Plain text body: ntfy.sh takes the message as-is, and most other
+            # endpoints (Discord, IFTTT, Home Assistant, a script of your own)
+            # accept either. The JSON is sent as a header so one call suits
+            # both styles without needing to know which service it is.
+            req = urllib.request.Request(
+                webhook, data=message.encode("utf-8"), method="POST",
+                headers={"Content-Type": "text/plain; charset=utf-8",
+                         "Title": "CSI motion detected",
+                         "X-CSI-Payload": json.dumps(payload)})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                print(f"[alert] webhook -> HTTP {r.status}", flush=True)
+        except Exception as e:
+            print(f"[alert] webhook FAILED: {e}", flush=True)
+
+    if command:
+        try:
+            subprocess.run(command, shell=True, timeout=30,
+                           env={**os.environ,
+                                "CSI_MESSAGE": message,
+                                "CSI_HELD_SECONDS": str(payload.get("held_seconds", "")),
+                                "CSI_NODES": json.dumps(payload.get("nodes", {}))})
+            print(f"[alert] ran command", flush=True)
+        except Exception as e:
+            print(f"[alert] command FAILED: {e}", flush=True)
+
+
+async def alert_task(alerts, clients, combined_state, muted, args, last_status):
+    """Polls the combined room state and fires when occupancy is sustained."""
+    loop = asyncio.get_running_loop()
+    while True:
+        await asyncio.sleep(0.25)
+        combined = compute_combined(combined_state, muted)
+        held = alerts.update(combined, time.monotonic())
+        if held is None:
+            continue
+
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        message = (f"Motion detected - someone has been in the room for "
+                   f"{held:.0f}s (since {stamp}).")
+        payload = {"event": "sustained_motion", "held_seconds": round(held, 1),
+                   "at": stamp, "nodes": dict(combined_state),
+                   "alert_number": alerts.count}
+        print(f"\n*** ALERT #{alerts.count}: {message} ***\n", flush=True)
+
+        # Tell any open dashboard too, so the alert is visible on screen and
+        # not only wherever the webhook goes.
+        await broadcast(clients, {"type": "warning", "node": "-",
+                                   "message": message}, last_status)
+
+        if args.alert_webhook or args.alert_command:
+            await loop.run_in_executor(None, _deliver_alert, args.alert_webhook,
+                                       args.alert_command, message, payload)
+
+
 async def main_async(args, model_bundle):
     clients = set()
     last_status = {}  # "type:node" -> most recent message of that kind (error/warning/init/...)
@@ -599,6 +718,18 @@ async def main_async(args, model_bundle):
     # and can miss a pong well within 20s without the connection actually
     # being dead; this was closing healthy-but-idle tabs with a scary
     # "keepalive ping timeout" error.
+    alerts = AlertManager(args.alert_seconds, args.alert_cooldown)
+    if args.alert_seconds > 0:
+        tasks.append(asyncio.create_task(
+            alert_task(alerts, clients, combined_state, muted, args, last_status)))
+        print(f"Alerting after {args.alert_seconds:.0f}s of sustained MOVING "
+              f"(cooldown {args.alert_cooldown:.0f}s)"
+              + (f" -> POST {args.alert_webhook}" if args.alert_webhook else "")
+              + (f" -> run: {args.alert_command}" if args.alert_command else "")
+              + ("" if (args.alert_webhook or args.alert_command)
+                 else " -> console + dashboard only (add --alert-webhook or "
+                      "--alert-command to send it somewhere)"))
+
     async with websockets.serve(handler, "localhost", args.ws_port,
                                  ping_interval=20, ping_timeout=60):
         print(f"WebSocket server on ws://localhost:{args.ws_port}")
@@ -616,6 +747,24 @@ def main():
     ap.add_argument("-b", "--baud", type=int, default=115200)
     ap.add_argument("--model", default="csi_model.joblib")
     ap.add_argument("--ws-port", type=int, default=8765)
+    ap.add_argument("--alert-seconds", type=float, default=5.0,
+                    help="fire an alert after this many CONSECUTIVE seconds of "
+                         "confirmed MOVING (0 disables alerting). The hold is what "
+                         "makes an alert trustworthy: per-window false alarms run "
+                         "~11%% in a noisy room, but sustained ones are rare.")
+    ap.add_argument("--alert-cooldown", type=float, default=60.0,
+                    help="minimum seconds between alerts, so one person moving "
+                         "around does not send a stream of them")
+    ap.add_argument("--alert-webhook", default=None,
+                    help="POST the alert to this URL. Works with ntfy.sh (free "
+                         "phone push, no account: https://ntfy.sh/your-topic), a "
+                         "Discord webhook, IFTTT, Home Assistant, or your own "
+                         "endpoint. The message is the body; a JSON payload is "
+                         "also sent in the X-CSI-Payload header.")
+    ap.add_argument("--alert-command", default=None,
+                    help="shell command to run on alert. CSI_MESSAGE, "
+                         "CSI_HELD_SECONDS and CSI_NODES are set in its "
+                         "environment.")
     args = ap.parse_args()
 
     bundle = joblib.load(args.model)

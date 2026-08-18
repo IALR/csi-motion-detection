@@ -122,6 +122,70 @@ def test_baseline_std_floor_blocks_dead_subcarrier_blowup():
 
 
 # --------------------------------------------------------------------------
+# Sustained-occupancy alerting. The HOLD is what makes an alert trustworthy:
+# per-window false alarms run ~11% in a noisy room, but requiring several
+# consecutive seconds collapses that to about one spurious alert per recorded
+# session, and none across the quiet ones.
+# --------------------------------------------------------------------------
+
+def _feed(mgr, state, seconds, t0, step=0.25):
+    """Drive the manager for `seconds` of one state; returns (fires, end_time)."""
+    fires, t = [], t0
+    for _ in range(int(seconds / step)):
+        t += step
+        r = mgr.update(state, t)
+        if r is not None:
+            fires.append(r)
+    return fires, t
+
+
+def test_alert_waits_for_the_full_hold():
+    mgr = S.AlertManager(hold_seconds=5.0, cooldown_seconds=60.0)
+    fires, t = _feed(mgr, "MOVING", 4.0, 0.0)
+    assert fires == [], "must not fire before the hold elapses"
+    fires, t = _feed(mgr, "MOVING", 2.0, t)
+    assert len(fires) == 1 and fires[0] >= 5.0
+
+
+def test_alert_does_not_repeat_while_still_occupied():
+    mgr = S.AlertManager(5.0, 60.0)
+    _, t = _feed(mgr, "MOVING", 6.0, 0.0)      # fires here
+    fires, _ = _feed(mgr, "MOVING", 60.0, t)
+    assert fires == [], "one person moving around must not stream alerts"
+
+
+def test_alert_ignores_brief_bursts():
+    """The entire reason for the hold: short false-alarm bursts, which is what
+    a noisy room produces, must never reach the user."""
+    mgr = S.AlertManager(5.0, 60.0)
+    t, fires = 0.0, []
+    for _ in range(20):
+        f, t = _feed(mgr, "MOVING", 3.0, t)    # 3s of MOVING - under the hold
+        fires += f
+        _, t = _feed(mgr, "EMPTY", 2.0, t)
+    assert fires == [], "20 short bursts should produce no alert at all"
+
+
+def test_alert_never_fires_on_unknown_state():
+    """None means every node is offline, muted or still warming up. An alert
+    then would be asserting occupancy from an absence of sensors."""
+    mgr = S.AlertManager(5.0, 60.0)
+    fires, _ = _feed(mgr, None, 30.0, 0.0)
+    assert fires == []
+
+
+def test_alert_cooldown_then_recovers():
+    mgr = S.AlertManager(5.0, 60.0)
+    _, t = _feed(mgr, "MOVING", 6.0, 0.0)      # first alert
+    _, t = _feed(mgr, "EMPTY", 2.0, t)
+    fires, t = _feed(mgr, "MOVING", 10.0, t)
+    assert fires == [], "cooldown must suppress a re-entry"
+    t += 60                                     # let the cooldown expire
+    fires, _ = _feed(mgr, "MOVING", 6.0, t)
+    assert len(fires) == 1, "must alert again once the cooldown has passed"
+
+
+# --------------------------------------------------------------------------
 # Zone detection (add-on). The binary motion model must stay untouched: the
 # `zone` column sits ALONGSIDE `label`, which keeps its 0/2 values, so every
 # zone recording is also ordinary motion training data.
