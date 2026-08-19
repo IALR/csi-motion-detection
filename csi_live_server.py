@@ -609,12 +609,25 @@ def _send_email(cfg, message, payload):
             smtp.login(cfg["user"], password)
             smtp.send_message(msg)
         print(f"[alert] email -> {cfg['to']}", flush=True)
-    except smtplib.SMTPAuthenticationError:
-        # By far the most common failure, and the error itself is unhelpful.
-        print("[alert] email FAILED: authentication rejected. For Gmail you "
-              "need an APP PASSWORD (16 characters, from Google Account -> "
-              "Security -> 2-Step Verification -> App passwords), not your "
-              "normal account password.", flush=True)
+    except smtplib.SMTPAuthenticationError as e:
+        # Show what the server actually said as well as the likely causes: an
+        # earlier version asserted "you used your account password", which is
+        # only one of several possibilities and sends people down the wrong
+        # path when the real problem is a different account or 2FA being off.
+        detail = e.smtp_error.decode(errors="replace") if e.smtp_error else ""
+        print(f"[alert] email FAILED: server rejected the login "
+              f"(code {e.smtp_code}).\n"
+              f"         server said: {detail.strip()}\n"
+              f"         For Gmail, check in this order:\n"
+              f"           1. The app password must belong to THIS account "
+              f"({cfg['user']}) - one generated while signed in to a different\n"
+              f"              Google account will be rejected exactly like this.\n"
+              f"           2. 2-Step Verification must be ON for that account, "
+              f"or app passwords do not work at all.\n"
+              f"           3. It must be an APP PASSWORD, not the normal "
+              f"account password.\n"
+              f"           4. Spaces in the 16 characters are optional; both "
+              f"forms were accepted historically.", flush=True)
     except Exception as e:
         print(f"[alert] email FAILED: {e}", flush=True)
 
@@ -825,11 +838,40 @@ def main():
     ap.add_argument("--smtp-port", type=int, default=587)
     ap.add_argument("--smtp-user", default=None,
                     help="the sending account (defaults to $CSI_SMTP_USER)")
+    ap.add_argument("--test-alert", action="store_true",
+                    help="fire one alert immediately and exit, without touching the "
+                         "serial port. Checks the delivery setup on its own, instead "
+                         "of standing in a room waving until something happens.")
     ap.add_argument("--alert-command", default=None,
                     help="shell command to run on alert. CSI_MESSAGE, "
                          "CSI_HELD_SECONDS and CSI_NODES are set in its "
                          "environment.")
     args = ap.parse_args()
+
+    if args.test_alert:
+        # Deliberately before the model loads and before any port is opened:
+        # this is purely a delivery check and must work with no hardware
+        # attached and nothing else running.
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        message = ("TEST alert from csi_live_server.py - if you are reading this, "
+                   "delivery works. No motion was detected; this was sent by "
+                   "--test-alert.")
+        payload = {"event": "test", "held_seconds": 0, "at": stamp,
+                   "nodes": {}, "alert_number": 0}
+        email_cfg = None
+        if args.alert_email:
+            email_cfg = {"to": args.alert_email, "host": args.smtp_host,
+                         "port": args.smtp_port,
+                         "user": args.smtp_user or os.environ.get("CSI_SMTP_USER", "")}
+        if not (args.alert_webhook or args.alert_command or email_cfg):
+            print("Nothing to test: add --alert-webhook, --alert-email or "
+                  "--alert-command.")
+            return
+        print(f"Sending a test alert at {stamp}...")
+        _deliver_alert(args.alert_webhook, args.alert_command, message, payload,
+                       email_cfg)
+        print("Done. If nothing arrived, the messages above say why.")
+        return
 
     bundle = joblib.load(args.model)
     calib_seconds = bundle.get("calib_seconds", CALIB_SECONDS_DEFAULT)
