@@ -185,6 +185,42 @@ def test_alert_cooldown_then_recovers():
     assert len(fires) == 1, "must alert again once the cooldown has passed"
 
 
+def test_email_requires_password_in_the_environment(monkeypatch):
+    """No CSI_SMTP_PASS must mean no connection attempt at all - not a crash,
+    and not a login with an empty password."""
+    from unittest import mock
+    monkeypatch.delenv("CSI_SMTP_PASS", raising=False)
+    cfg = {"to": "a@b.c", "host": "smtp.example.com", "port": 587, "user": "u@b.c"}
+    with mock.patch("smtplib.SMTP") as smtp:
+        S._send_email(cfg, "msg", {})
+    assert not smtp.called
+
+
+def test_email_is_addressed_and_authenticated_correctly(monkeypatch):
+    from unittest import mock
+    monkeypatch.setenv("CSI_SMTP_PASS", "app-pw")
+    cfg = {"to": "to@x.com", "host": "smtp.x.com", "port": 587, "user": "from@x.com"}
+    payload = {"held_seconds": 5.0, "at": "now", "nodes": {"A": "MOVING"},
+               "alert_number": 1}
+    with mock.patch("smtplib.SMTP") as smtp:
+        inst = smtp.return_value.__enter__.return_value
+        S._send_email(cfg, "Motion detected", payload)
+    assert smtp.call_args[0][:2] == ("smtp.x.com", 587)
+    assert inst.starttls.called, "must upgrade to TLS before authenticating"
+    assert inst.login.call_args[0] == ("from@x.com", "app-pw")
+    sent = inst.send_message.call_args[0][0]
+    assert sent["To"] == "to@x.com" and sent["From"] == "from@x.com"
+    assert "Motion detected" in sent.get_content()
+
+
+def test_smtp_password_is_never_a_command_line_flag():
+    """Arguments are visible to other processes and land in shell history, so
+    the password must come from the environment only."""
+    src = (Path(__file__).resolve().parent.parent / "csi_live_server.py").read_text(
+        encoding="utf-8")
+    assert not re.search(r'add_argument\("--[a-z-]*pass', src)
+
+
 # --------------------------------------------------------------------------
 # Zone detection (add-on). The binary motion model must stay untouched: the
 # `zone` column sits ALONGSIDE `label`, which keeps its 0/2 values, so every

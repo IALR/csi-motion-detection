@@ -574,7 +574,52 @@ class AlertManager:
         return held
 
 
-def _deliver_alert(webhook, command, message, payload):
+def _send_email(cfg, message, payload):
+    """Send the alert by SMTP. Blocking - always called from an executor.
+
+    The password is read from the environment ONLY, never from a command-line
+    flag: anything passed as an argument is visible to every other process on
+    the machine (Task Manager, `ps`) and gets written into shell history. An
+    app password for a mail account is worth protecting from both.
+    """
+    import smtplib
+    from email.message import EmailMessage
+
+    password = os.environ.get("CSI_SMTP_PASS")
+    if not password:
+        print("[alert] email skipped: CSI_SMTP_PASS is not set in the "
+              "environment. See --alert-email in --help.", flush=True)
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = "CSI motion detected"
+    msg["From"] = cfg["user"]
+    msg["To"] = cfg["to"]
+    msg.set_content(
+        f"{message}\n\n"
+        f"Held for : {payload.get('held_seconds')}s\n"
+        f"At       : {payload.get('at')}\n"
+        f"Nodes    : {json.dumps(payload.get('nodes', {}))}\n"
+        f"Alert #  : {payload.get('alert_number')}\n\n"
+        f"Sent by csi_live_server.py")
+
+    try:
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=20) as smtp:
+            smtp.starttls()
+            smtp.login(cfg["user"], password)
+            smtp.send_message(msg)
+        print(f"[alert] email -> {cfg['to']}", flush=True)
+    except smtplib.SMTPAuthenticationError:
+        # By far the most common failure, and the error itself is unhelpful.
+        print("[alert] email FAILED: authentication rejected. For Gmail you "
+              "need an APP PASSWORD (16 characters, from Google Account -> "
+              "Security -> 2-Step Verification -> App passwords), not your "
+              "normal account password.", flush=True)
+    except Exception as e:
+        print(f"[alert] email FAILED: {e}", flush=True)
+
+
+def _deliver_alert(webhook, command, message, payload, email_cfg=None):
     """Blocking delivery, run in an executor so it can never stall the event
     loop - a webhook to an unreachable host would otherwise freeze prediction
     and every connected dashboard along with it."""
@@ -596,6 +641,9 @@ def _deliver_alert(webhook, command, message, payload):
                 print(f"[alert] webhook -> HTTP {r.status}", flush=True)
         except Exception as e:
             print(f"[alert] webhook FAILED: {e}", flush=True)
+
+    if email_cfg:
+        _send_email(email_cfg, message, payload)
 
     if command:
         try:
@@ -632,9 +680,15 @@ async def alert_task(alerts, clients, combined_state, muted, args, last_status):
         await broadcast(clients, {"type": "warning", "node": "-",
                                    "message": message}, last_status)
 
-        if args.alert_webhook or args.alert_command:
+        email_cfg = None
+        if args.alert_email:
+            email_cfg = {"to": args.alert_email, "host": args.smtp_host,
+                         "port": args.smtp_port,
+                         "user": args.smtp_user or os.environ.get("CSI_SMTP_USER", "")}
+        if args.alert_webhook or args.alert_command or email_cfg:
             await loop.run_in_executor(None, _deliver_alert, args.alert_webhook,
-                                       args.alert_command, message, payload)
+                                       args.alert_command, message, payload,
+                                       email_cfg)
 
 
 async def main_async(args, model_bundle):
@@ -761,6 +815,16 @@ def main():
                          "Discord webhook, IFTTT, Home Assistant, or your own "
                          "endpoint. The message is the body; a JSON payload is "
                          "also sent in the X-CSI-Payload header.")
+    ap.add_argument("--alert-email", default=None,
+                    help="email address to alert. The SMTP password comes from the "
+                         "CSI_SMTP_PASS environment variable and is never accepted "
+                         "as a flag, because command-line arguments are visible to "
+                         "other processes and land in shell history. For Gmail use "
+                         "an APP PASSWORD, not your account password.")
+    ap.add_argument("--smtp-host", default="smtp.gmail.com")
+    ap.add_argument("--smtp-port", type=int, default=587)
+    ap.add_argument("--smtp-user", default=None,
+                    help="the sending account (defaults to $CSI_SMTP_USER)")
     ap.add_argument("--alert-command", default=None,
                     help="shell command to run on alert. CSI_MESSAGE, "
                          "CSI_HELD_SECONDS and CSI_NODES are set in its "
