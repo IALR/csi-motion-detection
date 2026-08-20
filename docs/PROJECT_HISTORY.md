@@ -1419,6 +1419,223 @@ for the OR combination. The generated headers `csi_model_data.h` and
 
 ---
 
+## 28. Standalone operation: detection and dashboard on the board itself
+
+**Why asked:** "i want to give up on the laptop and make the esp do everything
+is that possible or not". §27 had proved the board *could* run the model; this
+section makes it actually do so, unattended.
+
+**Scope, agreed up front.** Training stays on the PC - record, run
+`train_model.py`, export, flash. Only inference moved. Day to day the board
+runs off a phone charger with no PC anywhere; the laptop is needed only when
+retraining.
+
+**Everything here is ADDITIVE.** `csi_node.c` still prints its `CSI_AMP` line
+FIRST, unchanged, before any inference runs. The serial stream is what
+`csi_live_server.py` and the collector consume, and standalone detection must
+never be able to delay or disturb it. Verified by diffing the firmware for any
+changed `CSI_AMP`/`printf`/`snprintf` line: zero. The PC pipeline works exactly
+as before with the new firmware flashed.
+
+### On-device detection (`csi_standalone.c`)
+
+A three-state machine - WARMUP (discard 30 frames, since packets right after
+association are unrepresentative while rate adaptation and AGC settle) ->
+CALIBRATING (100 frames = 10s, "leave the room") -> RUNNING. Then a sliding
+8-frame window scored every frame, the same `PredictionSmoother` majority-of-5,
+and the same `RollingCalibrator` blend-and-floor logic as the PC.
+
+Inference runs in the printer task straight after the UART write, not in a
+separate task: ~200 trees x ~20 levels is well under a millisecond against the
+~65ms it takes to shift a 750-byte line out at 115200 baud. Only fully
+formatted frames are scored, so a truncated line never reaches the model.
+
+Buffers are static and total ~107KB - affordable against the S3's SRAM but far
+beyond any task stack (§27's boot-loop was exactly that mistake).
+
+### The dashboard, served by the board
+
+The user pushed back on building a second UI: *"but i already have the
+webpage"*. Correct, and it changed the design for the better. The board now
+serves `csi_dashboard.html` **verbatim**, embedded from the repo root via
+`EMBED_FILES "../../csi_dashboard.html"` so the two copies cannot drift, and
+speaks the **same eight WebSocket messages** `csi_live_server.py` speaks. The
+protocol was the hard design work and it already existed.
+
+The single change the page needed: `WS_URL` was hardcoded to
+`ws://localhost:8765`, so a page served by the board still tried to reach the
+laptop. It now derives from how the page was loaded - `file://` keeps using the
+PC server, `http://host/` connects back to that host - so one file covers both
+deployments. A `?ws=` override remains for debugging.
+
+Frames are pushed by a **polling task**, not from the printer task: the
+detector publishes its latest active-subcarrier row with a sequence number and
+the web task polls at 10Hz. A slow phone or a stalled socket therefore cannot
+delay serial output or inference. Only the ~108 ACTIVE subcarriers are sent;
+the ~20 dead guard bands would draw as a permanent black stripe.
+
+### Six bugs, and which method caught each
+
+This is the useful part of the section. Nearly all of them were invisible to
+reading and only appeared on hardware.
+
+1. **Boot-looping stack overflow** (§27, repeated here for the pattern): found
+   only on the device, *after* the parity self-test passed.
+2. **Detection ran but was invisible.** Logging fired only on state CHANGES,
+   which in a quiet room means no output at all - indistinguishable from "not
+   running", especially against 750-byte CSI lines flooding past at 10Hz. Added
+   a status line every 5s carrying state, vote fraction, raw prediction, RSSI,
+   energy, noise floor and recalibration count. Also fixed a real init race
+   found while looking: `csi_standalone_init()` memsets the whole state while
+   the printer task reads it from another task, and it was being called *after*
+   `start_csi()`.
+3. **The 71KB page in one `httpd_resp_send`**, plus an off-by-one:
+   `EMBED_FILES` embeds RAW bytes with **no** null terminator (`EMBED_TXTFILES`
+   is the variant that appends one), so the `-1` silently truncated the last
+   byte. The startup log reading 71570 for a 71571-byte file is what exposed
+   it. Now chunked in 4KB pieces.
+4. **A subcarrier mismatch made the page hang with no explanation.** During a
+   mismatch no active set is ever decided, so no `init` is sent, so the push
+   loop sent *nothing at all* - the dashboard sat on "waiting" giving no reason.
+   The exact silent-degradation fault fixed in the Python server in §22,
+   reappearing in the firmware. Now the page is told.
+5. **"Connected" in the browser, `ws_clients:0` on the board.** The decisive
+   evidence came from the `/status` endpoint added for exactly this purpose:
+   everything else was healthy (state running, 108 active subcarriers, energy
+   being computed) and only the link between detector and page was dead. Cause:
+   a hand-maintained array of client sockets, from which `ws_broadcast` removed
+   a client on ANY failed async send - permanently, though the socket was still
+   open, with no path back. The browser never noticed because nothing closed
+   its socket. Replaced with `httpd_get_client_list()` +
+   `httpd_ws_get_fd_info()` on every send: no local state left to desynchronise.
+6. **`REQUIRES` in CMakeLists disabled `main`'s implicit dependency on every
+   component**, so every component it used had to be listed - failing with
+   "esp_timer.h: No such file or directory", which says nothing about
+   dependencies.
+
+### Two recurring failures fixed at the source, not patched again
+
+Both had already broken this project multiple times, and each previous fix was
+to edit a constant that goes stale again.
+
+- **192 subcarriers (three occurrences: §9, §21, and again here).** Channel
+  width decides the subcarrier count - 20MHz gives 128, 40MHz gives 192 - and
+  the model is built on 128. Every prior fix was "change the router's settings",
+  which is not even available on a phone hotspot. `esp_wifi_set_bandwidth(
+  WIFI_IF_STA, WIFI_BW20)` fixes it at the right end: the station advertises
+  20MHz only, so the AP cannot pull the link up whatever it decides. Scoped to
+  this board's own link - it changes nothing about the hotspot or other devices.
+- **No CSI at all, three occurrences.** CSI only exists when packets arrive,
+  and the firmware manufactures that traffic by pinging the router. The target
+  came from a hardcoded `ROUTER_IP`, while the hotspot reassigns its subnet
+  freely - observed going `10.170.51.x` -> `172.22.34.x` -> `192.168.43.x`
+  across one session. The board would boot, join Wi-Fi, log "CSI enabled" and
+  emit nothing, with no clue that the ping was the problem. Now taken from the
+  DHCP lease (`ip_info.gw`), which is right by construction; `ROUTER_IP`
+  remains a fallback and the log says which is in use.
+
+### A serial bug that made the PC tools look broken
+
+`csi_live_server.py` would open COM9 successfully and read **zero bytes**,
+reporting "wrong COM port, device not powered" - none of which was true. ESP32
+dev boards wire the USB bridge's RTS to EN (reset) and DTR to GPIO0, and those
+lines keep whatever state the previous program left them in. **Exiting `idf.py
+monitor` is enough to leave RTS asserted, holding the chip in reset.** The port
+opens perfectly while the board runs nothing. This bites precisely when
+alternating between the firmware monitor and the Python tools, which is the
+whole workflow once standalone work started. All three tools that open a port
+now deassert DTR, pulse RTS and release it.
+
+**Status:** self-test PASS, Wi-Fi connected, CSI streaming, detection running
+and logging, page served and fetched byte-exact. The `ws_clients:0` fix is
+committed but **had not been reflashed at the time of writing**, so the served
+dashboard coming fully alive is still unconfirmed. ESP-NOW between the two
+boards is not built, so standalone is single-node only.
+
+---
+
+## 29. Alerting on sustained occupancy
+
+**Why asked:** "when this system detects the presence of a person for 5s
+straight i want it to do an action like sending a message". Asked for the
+**laptop version**, not the ESP - the user was explicit when the question was
+put to them.
+
+**The hold length was chosen by measurement, before writing the feature.**
+Alerting on the first MOVING window would be useless: per-window false alarms
+run ~11% in a noisy room. Requiring 5 CONSECUTIVE seconds of confirmed MOVING
+was measured against out-of-fold predictions across all 10 sessions:
+
+| | false alerts | per hour of empty room | real movement caught |
+|---|---|---|---|
+| Quiet sessions | **0** in 8 min | 0 | all |
+| Loud sessions | 1 in 7 min | ~8/hour | all |
+
+So the hold does most of the work of making an alert trustworthy. **Be honest
+about the limits**: that is only ~21 minutes of empty-room recording in total,
+so "none in the quiet sessions" bounds the rate loosely rather than proving it
+is zero, and a loud room will still produce several spurious alerts an hour.
+The docstring says so, and this matters because the user's board was reading a
+noise floor of 0.235 - well inside the loud regime - while this was built.
+
+**Design.** `AlertManager` tracks how long the OR-**combined** room state has
+been MOVING; a cooldown (default 60s) stops one person walking around producing
+a stream of messages; any return to EMPTY ends the occupancy so the next person
+triggers a fresh alert rather than being suppressed by a cooldown started
+earlier. Because it watches the combined state, it works unchanged with one or
+two nodes: a person in node A's blind spot still alerts via node B, muted nodes
+cannot trigger it, and a dead node cannot block it.
+
+**Delivery is a generic HTTP POST** rather than one integration - the same flag
+covers ntfy.sh, Discord, IFTTT, Home Assistant, or a private endpoint. The
+message is the plain-text body and a JSON payload rides in a header, so
+text-oriented and JSON-oriented services both work. `--alert-command` runs
+anything instead. Delivery runs in an executor: a webhook pointed at an
+unreachable host would otherwise stall the event loop and freeze prediction and
+every connected dashboard with it.
+
+**Email** was added over stdlib `smtplib`. The password comes from
+`CSI_SMTP_PASS` in the environment and is deliberately **not** accepted as a
+command-line flag - arguments are visible to other processes and land in shell
+history. A test asserts no `--*pass*` flag ever gets added.
+
+**`--test-alert`** fires one alert immediately and exits without touching the
+serial port or loading the model, so delivery can be checked without standing
+in a room waving.
+
+### Diagnosing delivery, which took three attempts
+
+- **Gmail rejected the login** with `535 BadCredentials`, both with and without
+  spaces in the app password. The first error message asserted "you need an app
+  password, not your account password" - one plausible cause stated as if it
+  were the only one. It was rewritten to print the server's own response
+  verbatim plus causes in likelihood order, naming the account it authenticated
+  as, since the most probable explanation was an app password generated under a
+  **different** Google account.
+- **ntfy then failed with `CERTIFICATE_VERIFY_FAILED`.** Probing the
+  certificate actually being served showed the issuer as *"Avast Web/Mail
+  Shield Root - generated by Avast Antivirus for SSL/TLS scanning"*. Avast was
+  intercepting all HTTPS: its root is malformed (`Basic Constraints not marked
+  critical`, which OpenSSL 3.x correctly rejects) and is absent from certifi,
+  which is why the system store and certifi failed *differently*. This would
+  break any Python HTTPS call on that machine. Disabling Avast's HTTPS scanning
+  restored the real Let's Encrypt certificate and delivery succeeded.
+
+**A note for whoever picks this up.** ntfy topics are protected by obscurity
+alone - anyone who knows the name can read it. For an occupancy sensor the
+leaked information is "the room is empty right now", which is the most
+sensitive thing this system produces. The user was advised three times to use a
+random topic name and chose `INTRUSION_ALERTS_ESP32_S3`, which is all
+dictionary words. Worth revisiting.
+
+**Not built:** alerting in the firmware. Standalone the board detects and
+serves the page but sends no notification, so an intrusion alert requires the
+PC. Doing it properly for two boards needs ESP-NOW as well, otherwise each
+board would fire its own notification and the OR logic would be lost - a
+regression against what the PC already does.
+
+---
+
 ## Working style notes for whoever picks this up
 
 - The user wants concrete numbers and real diagnosis, not reassurance. When

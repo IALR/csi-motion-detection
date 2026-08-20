@@ -19,7 +19,7 @@ This file is just a fast-start summary.
   95-99%, noisy ones 85-95% (§23). `assess_noise_floor()` in `csi_common.py`
   grades it and the live system reports it. Don't treat a single accuracy
   number as the system's behaviour — ask which regime it was measured in.
-- **Tests: `python -m pytest tests/`** (25 tests, all passing). They pin the
+- **Tests: `python -m pytest tests/`** (72 tests, all passing). They pin the
   live-system failure modes — malformed serial lines, a node going offline,
   the AP changing channel width mid-run — because every bug this project
   has hit twice was a failure-mode bug, not a math bug. Run them after
@@ -31,6 +31,17 @@ This file is just a fast-start summary.
   per-node degradation on subcarrier mismatch (doesn't crash the other
   node). See PROJECT_HISTORY.md §15 and §21 before touching
   `csi_common.py`'s calibration code or `csi_live_server.py`.
+- **The ESP32 can also run standalone** (§28): the same model is exported to
+  C and runs on-device (parity with sklearn verified 12/12 on hardware), the
+  board serves `csi_dashboard.html` itself over HTTP/WebSocket, and the serial
+  `CSI_AMP` stream is untouched so the PC pipeline still works identically.
+  Standalone is single-node — ESP-NOW is not built, so two-board combining
+  still needs the PC.
+- **Alerting** (§29): `--alert-webhook` / `--alert-email` fire after 5s of
+  sustained OR-combined MOVING, with a cooldown. The 5s hold was chosen by
+  measurement, not taste — it cuts ~11% per-window false alarms to roughly one
+  spurious alert per session. Only in `csi_live_server.py`; the firmware has
+  no alerting.
 - Public repo: **https://github.com/IALR/csi-motion-detection** — commit +
   push after any change worth keeping, nothing happens automatically.
 - Top open priority: diverse "moving" data — all training data is one
