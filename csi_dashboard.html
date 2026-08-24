@@ -5,431 +5,1233 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CSI Live Dashboard</title>
 <style>
+  /* ==========================================================================
+     CSI MOTION DETECTION — instrument design system
+     --------------------------------------------------------------------------
+     Design concept: "make the invisible visible". The page is the instrument
+     panel of a device that watches an RF field. Three rules follow from that:
+
+       1. Color is semantic, never decorative. Green/red/amber are reserved for
+          system state; blue is data and acquisition. If something is red, it
+          means something.
+       2. The signal visualizations live on a DARK "instrument viewport" surface
+          in BOTH themes - like a screen set into a device housing. Their tokens
+          (--inst-*) are deliberately theme-independent so the screen looks the
+          same whatever the page around it is doing.
+       3. Uncertainty must never look like certainty. Transitional states
+          (warming/calibrating) get outline icons, dashed edges and neutral or
+          amber tone; confirmed states get filled icons and solid color.
+
+     Everything is self-contained: system fonts, inline SVG, no external assets
+     of any kind. This file is embedded into ESP32 flash and served by the
+     board, so a single remote request would break the standalone deployment.
+     ========================================================================== */
+
   :root {
     color-scheme: light;
-    --page-bg:        #f6f6f4;
-    --grid-line:      rgba(11,11,11,0.035);
-    --alert-wash:     rgba(208,59,59,0.07);
-    --surface-1:      #fcfcfb;
-    --surface-2:      #f2f2ef;
-    --surface-3:      #e9e9e5;
-    --text-primary:   #0b0b0b;
-    --text-secondary: #52514e;
-    --text-muted:     #898781;
-    --grid:           #e1e0d9;
-    --baseline:       #c3c2b7;
-    --border:         rgba(11,11,11,0.10);
-    --series-1:       #2a78d6;
-    --seq-lo:         #cde2fb;
-    --seq-hi:         #104281;
-    --good:           #0ca30c;
-    --good-bg:        #e5f5e5;
-    --critical:       #d03b3b;
-    --critical-bg:    #fbe9e9;
-    --warn:           #b8860b;
-    --warn-bg:        #fff4e5;
-    --warn-text:      #8a5a00;
-    --shadow-card:    0 1px 2px rgba(11,11,11,0.04), 0 2px 8px rgba(11,11,11,0.05);
-    --shadow-card-sm: 0 1px 1px rgba(11,11,11,0.03), 0 1px 3px rgba(11,11,11,0.03);
-    --font-mono: ui-monospace, "JetBrains Mono", "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+
+    /* ---- Geometry ------------------------------------------------------- */
+    --radius-lg: 16px;   /* cards */
+    --radius-md: 10px;   /* controls, tiles */
+    --radius-sm:  7px;   /* chips, small indicators */
+
+    --space-1:  4px;
+    --space-2:  8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 22px;
+    --space-6: 30px;
+    --space-7: 42px;
+
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+                 "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "IBM Plex Mono",
+                 "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
+
+    /* ---- Surfaces (light) ----------------------------------------------- */
+    --bg:             #f6f6f4;
+    --surface:        #fcfcfb;
+    --surface-raised: #ffffff;
+    --surface-sunken: #f1f1ee;
+    --border:         rgba(18,20,24,0.09);
+    --border-strong:  rgba(18,20,24,0.16);
+    --grid-line:      rgba(18,20,24,0.030);
+
+    --text:           #14161a;
+    --text-muted:     #55585f;
+    --text-subtle:    #8b8e95;
+
+    /* ---- Semantic ------------------------------------------------------- */
+    --accent:         #0f62d0;   /* data / acquisition / selection */
+    --accent-soft:    rgba(15,98,208,0.09);
+    --accent-line:    rgba(15,98,208,0.28);
+
+    --success:        #157f3d;   /* healthy / EMPTY / confirmed */
+    --success-soft:   rgba(21,127,61,0.10);
+    --success-line:   rgba(21,127,61,0.26);
+
+    --danger:         #c2352f;   /* MOVING / fault */
+    --danger-soft:    rgba(194,53,47,0.09);
+    --danger-line:    rgba(194,53,47,0.26);
+
+    --warning:        #a2680b;   /* calibrating / transitional / muted */
+    --warning-soft:   rgba(162,104,11,0.11);
+    --warning-line:   rgba(162,104,11,0.28);
+
+    --shadow-sm: 0 1px 2px rgba(18,20,24,0.04);
+    --shadow-md: 0 1px 2px rgba(18,20,24,0.04), 0 6px 20px rgba(18,20,24,0.05);
+
+    /* ---- Instrument viewport: IDENTICAL in both themes -------------------
+       The waterfall and the motion-energy trace are the two places where the
+       raw radio signal is shown. Keeping them on one fixed dark surface makes
+       them read as a physical screen rather than as page content, and it also
+       means the waterfall ramp is stable: the JS samples --seq-* ONCE at load
+       via getComputedStyle, so theme-dependent values there would silently
+       freeze at whichever theme happened to be active on first paint. */
+    --inst-bg:          #070e19;
+    --inst-bg-2:        #0a1524;
+    --inst-border:      rgba(122,178,238,0.18);
+    --inst-grid:        rgba(130,180,235,0.10);
+    --inst-baseline:    rgba(130,180,235,0.24);
+    --inst-text:        #6d8bac;
+    --inst-text-bright: #b6d0ea;
+    --inst-accent:      #4fb0f0;
+
+    /* Waterfall intensity ramp. Must stay plain 6-digit hex - the renderer
+       parses these with parseInt(hex,16). Three stops rather than two: a
+       single linear blend from navy to cyan washes out the mid-range where
+       most subcarrier amplitude actually sits. */
+    --seq-lo:  #06101e;
+    --seq-mid: #17588f;
+    --seq-hi:  #6fd3f2;
   }
+
+  /* ---- Dark theme. Deliberately designed, not an inversion: the surfaces
+     step up in lightness as they come forward, and text is a soft white so
+     that large type does not glare on an OLED panel. ---------------------- */
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       color-scheme: dark;
-      --page-bg:        #0a0a0b;
-      --grid-line:      rgba(255,255,255,0.045);
-      --alert-wash:     rgba(230,103,103,0.09);
-      --surface-1:      #181817;
-      --surface-2:      #101010;
-      --surface-3:      #232322;
-      --text-primary:   #ffffff;
-      --text-secondary: #c3c2b7;
-      --text-muted:     #898781;
-      --grid:           #2c2c2a;
-      --baseline:       #383835;
-      --border:         rgba(255,255,255,0.10);
-      --series-1:       #3987e5;
-      --seq-lo:         #184f95;
-      --seq-hi:         #86b6ef;
-      --good:           #0ca30c;
-      --good-bg:        #12280f;
-      --critical:       #e66767;
-      --critical-bg:    #2e1414;
-      --warn:           #f0b429;
-      --warn-bg:        #332600;
-      --warn-text:      #f0b429;
-      --shadow-card:    0 1px 2px rgba(0,0,0,0.35), 0 2px 10px rgba(0,0,0,0.3);
-      --shadow-card-sm: 0 1px 1px rgba(0,0,0,0.25), 0 1px 4px rgba(0,0,0,0.2);
+      --bg:             #090a0c;
+      --surface:        #0f1114;
+      --surface-raised: #15171b;
+      --surface-sunken: #0b0d10;
+      --border:         rgba(255,255,255,0.085);
+      --border-strong:  rgba(255,255,255,0.16);
+      --grid-line:      rgba(255,255,255,0.028);
+
+      --text:           #e9ebee;
+      --text-muted:     #9aa0a9;
+      --text-subtle:    #6a7079;
+
+      --accent:         #5aa2ff;
+      --accent-soft:    rgba(90,162,255,0.12);
+      --accent-line:    rgba(90,162,255,0.34);
+
+      --success:        #3fbf6a;
+      --success-soft:   rgba(63,191,106,0.12);
+      --success-line:   rgba(63,191,106,0.30);
+
+      --danger:         #ff6b62;
+      --danger-soft:    rgba(255,107,98,0.12);
+      --danger-line:    rgba(255,107,98,0.30);
+
+      --warning:        #f0a93b;
+      --warning-soft:   rgba(240,169,59,0.13);
+      --warning-line:   rgba(240,169,59,0.32);
+
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+      --shadow-md: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.35);
     }
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --page-bg:        #0a0a0b;
-    --grid-line:      rgba(255,255,255,0.045);
-    --alert-wash:     rgba(230,103,103,0.09);
-    --surface-1:      #181817;
-    --surface-2:      #101010;
-    --surface-3:      #232322;
-    --text-primary:   #ffffff;
-    --text-secondary: #c3c2b7;
-    --text-muted:     #898781;
-    --grid:           #2c2c2a;
-    --baseline:       #383835;
-    --border:         rgba(255,255,255,0.10);
-    --series-1:       #3987e5;
-    --seq-lo:         #184f95;
-    --seq-hi:         #86b6ef;
-    --good:           #0ca30c;
-    --good-bg:        #12280f;
-    --critical:       #e66767;
-    --critical-bg:    #2e1414;
-    --warn:           #f0b429;
-    --warn-bg:        #332600;
-    --warn-text:      #f0b429;
-    --shadow-card:    0 1px 2px rgba(0,0,0,0.35), 0 2px 10px rgba(0,0,0,0.3);
-    --shadow-card-sm: 0 1px 1px rgba(0,0,0,0.25), 0 1px 4px rgba(0,0,0,0.2);
+    --bg:             #090a0c;
+    --surface:        #0f1114;
+    --surface-raised: #15171b;
+    --surface-sunken: #0b0d10;
+    --border:         rgba(255,255,255,0.085);
+    --border-strong:  rgba(255,255,255,0.16);
+    --grid-line:      rgba(255,255,255,0.028);
+
+    --text:           #e9ebee;
+    --text-muted:     #9aa0a9;
+    --text-subtle:    #6a7079;
+
+    --accent:         #5aa2ff;
+    --accent-soft:    rgba(90,162,255,0.12);
+    --accent-line:    rgba(90,162,255,0.34);
+
+    --success:        #3fbf6a;
+    --success-soft:   rgba(63,191,106,0.12);
+    --success-line:   rgba(63,191,106,0.30);
+
+    --danger:         #ff6b62;
+    --danger-soft:    rgba(255,107,98,0.12);
+    --danger-line:    rgba(255,107,98,0.30);
+
+    --warning:        #f0a93b;
+    --warning-soft:   rgba(240,169,59,0.13);
+    --warning-line:   rgba(240,169,59,0.32);
+
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+    --shadow-md: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.35);
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+
+  /* ==================== Base ==================== */
   * { box-sizing: border-box; }
+
   body {
-    margin: 0; min-height: 100vh;
-    color: var(--text-primary);
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0;
+    min-height: 100vh;
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
     -webkit-font-smoothing: antialiased;
-    background-color: var(--page-bg);
+    -moz-osx-font-smoothing: grayscale;
+    background-color: var(--bg);
+    /* Technical grid: present, but at the threshold of visibility - it should
+       register as texture and disappear the moment you stop looking for it. */
     background-image:
       linear-gradient(var(--grid-line) 1px, transparent 1px),
       linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-    background-size: 32px 32px;
-    transition: background-color 0.4s ease;
+    background-size: 30px 30px;
+    background-attachment: fixed;
+    transition: background-color 0.5s ease;
   }
-  /* Faint state-driven wash instead of a decorative gradient - only appears
-     while the COMBINED prediction is MOVING, so color on this page always
-     means something rather than being permanent decoration. */
-  body.state-moving {
-    background-image:
-      radial-gradient(ellipse 900px 460px at 50% -8%, var(--alert-wash), transparent 65%),
-      linear-gradient(var(--grid-line) 1px, transparent 1px),
-      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+
+  /* ---- State atmosphere -------------------------------------------------
+     The instrument's "mood" tracks its actual reading. This is the one place
+     the whole page reacts, and it is driven only by the CONFIRMED combined
+     state, so it can never imply something the system has not concluded.
+     `body.state-moving` is set directly by the renderer; the :has() rules
+     cover the calmer states and degrade to no atmosphere where unsupported. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0;
+    transition: opacity 0.7s ease, background 0.7s ease;
+    background: radial-gradient(ellipse 1100px 520px at 50% -10%,
+                                var(--danger-soft), transparent 70%);
   }
-  .wrap { max-width: 1180px; margin: 0 auto; padding: 20px 20px 60px; }
-  .icon { width: 16px; height: 16px; flex: none; }
-  .icon-lg { width: 20px; height: 20px; flex: none; }
-  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  body.state-moving::before { opacity: 1; }
+
+  body:has(.prediction-card.state-empty)::before {
+    opacity: 1;
+    background: radial-gradient(ellipse 1100px 460px at 50% -12%,
+                                var(--success-soft), transparent 72%);
+  }
+  body:has(.prediction-card.state-calibrating)::before {
+    opacity: 1;
+    background: radial-gradient(ellipse 1000px 420px at 50% -12%,
+                                var(--warning-soft), transparent 72%);
+  }
+
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: var(--space-5) var(--space-5) 72px;
+  }
+
+  .icon    { width: 15px; height: 15px; flex: none; }
+  .icon-lg { width: 19px; height: 19px; flex: none; }
+  .mono    { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
   .node-b-hidden { display: none !important; }
 
-  /* ---------------- Top bar ---------------- */
+  /* Micro-label: the instrument's voice. Small, quiet, letterspaced. Used for
+     every section title and field name so the interface reads as labelled
+     equipment rather than as a web page. */
+  .eyebrow {
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    color: var(--text-subtle);
+    font-feature-settings: "ss01";
+  }
+
+  /* ==================== Top bar ==================== */
   .topbar {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 16px; flex-wrap: wrap;
-    padding: 14px 4px 18px;
-    margin-bottom: 6px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--space-5);
+    flex-wrap: wrap;
+    padding: var(--space-3) 0 var(--space-5);
+    margin-bottom: var(--space-5);
+    border-bottom: 1px solid var(--border);
   }
-  .brand { display: flex; align-items: center; gap: 12px; }
+
+  .brand { display: flex; align-items: center; gap: var(--space-3); }
+  /* Housing, not a logo blob: a bordered square with the RF arc inside, like
+     a component silkscreened onto a board. */
   .brand-mark {
-    width: 38px; height: 38px; border-radius: 10px; flex: none;
-    background: linear-gradient(155deg, var(--series-1), var(--seq-hi));
+    width: 40px; height: 40px; flex: none;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-strong);
+    background: var(--surface-raised);
+    color: var(--accent);
     display: flex; align-items: center; justify-content: center;
-    box-shadow: var(--shadow-card);
+    box-shadow: var(--shadow-sm);
+    position: relative;
   }
-  .brand-mark .icon-lg { color: #fff; }
-  .brand h1 { font-size: 18px; font-weight: 700; margin: 0 0 2px; letter-spacing: -0.01em; }
-  .brand .tagline { font-size: 12px; color: var(--text-secondary); margin: 0; }
+  .brand-mark::after {
+    content: '';
+    position: absolute; inset: 3px;
+    border-radius: 7px;
+    border: 1px solid var(--accent-line);
+    opacity: 0.5;
+  }
+  .brand h1 {
+    font-size: 14px; font-weight: 700; margin: 0 0 3px;
+    letter-spacing: 0.085em; text-transform: uppercase;
+    color: var(--text);
+  }
+  .brand .tagline {
+    font-size: 12px; color: var(--text-subtle); margin: 0; letter-spacing: 0.005em;
+  }
 
-  .topbar-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .topbar-right {
+    display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap;
+  }
 
-  .status-pills { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  /* ---- System readout: four labelled channels in one housing ------------ */
+  .status-pills {
+    display: flex; align-items: stretch;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+  }
   .pill {
-    display: flex; align-items: center; gap: 6px;
-    background: var(--surface-1); border: 1px solid var(--border);
-    border-radius: 999px; padding: 5px 11px 5px 9px;
-    font-size: 11.5px; color: var(--text-secondary);
-    box-shadow: var(--shadow-card-sm);
-    transition: border-color 0.2s;
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 7px 14px;
+    border-right: 1px solid var(--border);
+    min-width: 104px;
   }
-  .pill-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); flex: none; transition: background 0.25s; }
-  .pill-dot.good { background: var(--good); }
-  .pill-dot.warn { background: var(--warn); }
-  .pill-dot.bad { background: var(--critical); }
-  .pill-dot.live.good { animation: dot-breathe 2.2s ease-in-out infinite; }
-  @keyframes dot-breathe {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(12,163,12,0.35); }
-    50%      { box-shadow: 0 0 0 4px rgba(12,163,12,0); }
+  .pill:last-child { border-right: 0; }
+  .pill .pill-label {
+    font-size: 9px; font-weight: 650; letter-spacing: 0.10em;
+    text-transform: uppercase; color: var(--text-subtle);
+  }
+  .pill .pill-state {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11.5px; font-weight: 600; color: var(--text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .pill-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--text-subtle); flex: none;
+    transition: background 0.25s ease, box-shadow 0.25s ease;
+  }
+  .pill-dot.good { background: var(--success); }
+  .pill-dot.warn { background: var(--warning); }
+  .pill-dot.bad  { background: var(--danger); }
+  /* Breathing only while data is genuinely arriving - the animation IS the
+     liveness claim, so it must not run when nothing is streaming. */
+  .pill-dot.live.good { animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe {
+    0%, 100% { box-shadow: 0 0 0 0 var(--success-line); }
+    55%      { box-shadow: 0 0 0 4.5px transparent; }
   }
 
   .clock {
-    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
-    font-size: 12.5px; color: var(--text-secondary);
-    padding: 5px 4px;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 13px; font-weight: 500;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
   }
 
   .theme-btn {
     display: flex; align-items: center; gap: 6px;
-    background: var(--surface-1); border: 1px solid var(--border); color: var(--text-secondary);
-    font-size: 12px; padding: 6px 12px; border-radius: 8px; cursor: pointer;
-    box-shadow: var(--shadow-card-sm);
-    transition: color 0.15s, border-color 0.15s;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-family: var(--font-sans); font-size: 11px; font-weight: 600;
+    letter-spacing: 0.05em; text-transform: uppercase;
+    padding: 8px 12px; border-radius: var(--radius-md); cursor: pointer;
+    box-shadow: var(--shadow-sm);
+    transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
   }
-  .theme-btn:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+  .theme-btn:hover { color: var(--text); border-color: var(--border-strong); background: var(--surface-raised); }
+  .theme-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  /* ---------------- Banner ---------------- */
-  .banner {
-    display: none; align-items: center; gap: 9px;
-    background: var(--warn-bg); color: var(--warn-text);
-    border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px;
+  /* ==================== System conditions ==================== */
+  /* A STACK, not a single banner. Conditions are keyed per (kind, node) - the
+     same way the server keys the status it replays - so two nodes can report
+     at once, and resolving one cannot wipe the other off the screen.
+     Each row states its severity as a word before any colour is relied on,
+     carries the node it belongs to, and holds until it is resolved or
+     acknowledged. Nothing here blinks. */
+  .banner { display: none; }
+  .banner.show {
+    display: flex; flex-direction: column; gap: var(--space-2);
+    margin-bottom: var(--space-5);
   }
-  .banner.show { display: flex; }
 
-  /* ---------------- Grid & cards ---------------- */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  .alert {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: var(--space-3);
+    align-items: start;
+    padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+    border: 1px solid var(--border);
+    border-left-width: 3px;
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    animation: alert-in 0.26s cubic-bezier(0.2, 0, 0.2, 1) both;
+  }
+  @keyframes alert-in {
+    from { opacity: 0; transform: translateY(-5px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .alert-icon { width: 17px; height: 17px; flex: none; margin-top: 1px; }
+  .alert-body { min-width: 0; }
+  .alert-head {
+    display: flex; align-items: baseline; gap: var(--space-2);
+    flex-wrap: wrap; margin-bottom: 3px;
+  }
+  .alert-kind {
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.11em; text-transform: uppercase;
+  }
+  .alert-node, .alert-count, .alert-time {
+    font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.05em;
+    color: var(--text-subtle);
+  }
+  .alert-node {
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; text-transform: uppercase;
+  }
+  .alert-count { color: var(--text-muted); font-weight: 600; }
+  .alert-time { margin-left: auto; }
+  .alert-msg {
+    margin: 0; font-size: 12.5px; line-height: 1.5;
+    color: var(--text-muted); overflow-wrap: anywhere;
+  }
+
+  .alert-dismiss {
+    width: 24px; height: 24px; flex: none; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-subtle); cursor: pointer;
+    transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+  }
+  .alert-dismiss svg { width: 12px; height: 12px; }
+  .alert-dismiss:hover { color: var(--text); border-color: var(--border); background: var(--surface-raised); }
+  .alert-dismiss:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* FAULT - this node cannot work at all (the port never opened). */
+  .alert-fault { border-color: var(--danger-line); border-left-color: var(--danger); background: var(--danger-soft); }
+  .alert-fault .alert-icon, .alert-fault .alert-kind { color: var(--danger); }
+
+  /* DETECTION - the sustained-occupancy alert. Red because it matches MOVING,
+     but it is the system working rather than failing, so it is the one row
+     whose message is set in full-strength text: it is the thing the product
+     exists to tell you. */
+  .alert-detection { border-color: var(--danger-line); border-left-color: var(--danger); background: var(--danger-soft); }
+  .alert-detection .alert-icon, .alert-detection .alert-kind { color: var(--danger); }
+  .alert-detection .alert-msg { color: var(--text); font-weight: 500; }
+
+  /* DEGRADED - still streaming, but reduced. Outline icon, matching the
+     outline/filled rule used everywhere else on the page. */
+  .alert-degraded { border-color: var(--warning-line); border-left-color: var(--warning); background: var(--warning-soft); }
+  .alert-degraded .alert-icon, .alert-degraded .alert-kind { color: var(--warning); }
+
+  /* ==================== Grid & cards ==================== */
   .dashboard-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+    gap: var(--space-4);
   }
+
+  /* Surfaces, not floating boxes: a hairline border carries the edge and the
+     shadow only lifts the card a fraction off the page. */
   .card {
-    background: var(--surface-1);
+    background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 14px;
-    box-shadow: var(--shadow-card);
-    padding: 20px 22px 22px;
-    animation: card-in 0.35s ease both;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    padding: var(--space-5) var(--space-5) var(--space-6);
+    animation: card-in 0.4s cubic-bezier(0.2, 0, 0.2, 1) both;
   }
-  @keyframes card-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  @keyframes card-in {
+    from { opacity: 0; transform: translateY(5px); }
+    to   { opacity: 1; transform: none; }
+  }
   .card.span-full { grid-column: 1 / -1; }
 
-  /* Secondary/diagnostic cards (session summary, calibration) are demoted:
-     smaller shadow, tighter padding, smaller type - so the eye lands on the
-     prediction hero and the signal charts first. */
-  .card.card-secondary { padding: 16px 18px 18px; box-shadow: var(--shadow-card-sm); }
-  .card.card-secondary h2 { font-size: 11px; }
-  .card.card-secondary .meta-grid { font-size: 12.5px; }
+  /* Diagnostics are demoted so they cannot compete with the primary reading. */
+  .card.card-secondary { padding: var(--space-4) var(--space-5) var(--space-5); }
 
-  .card-head { display: flex; align-items: center; gap: 9px; margin: 0 0 14px; }
-  .card-head .icon { color: var(--text-muted); }
+  .card-head {
+    display: flex; align-items: center; gap: var(--space-2);
+    margin: 0 0 var(--space-4);
+  }
+  .card-head .icon { color: var(--text-subtle); }
   .card h2 {
-    font-size: 12.5px; font-weight: 700; color: var(--text-secondary); margin: 0;
-    text-transform: uppercase; letter-spacing: 0.04em;
+    font-size: 10px; font-weight: 650; color: var(--text-subtle); margin: 0;
+    text-transform: uppercase; letter-spacing: 0.10em;
+  }
+  .head-rule {
+    flex: 1; height: 1px; background: var(--border); min-width: var(--space-4);
   }
 
-  .desc { font-size: 12.5px; color: var(--text-secondary); line-height: 1.6; margin: 0 0 14px; }
+  .desc {
+    font-size: 12.5px; color: var(--text-subtle); line-height: 1.6;
+    margin: 0 0 var(--space-4); max-width: 76ch;
+  }
 
-  /* ---------------- Prediction (hero) card ---------------- */
-  .prediction-card { padding: 26px 28px 28px; }
-  .prediction-layout { display: flex; align-items: stretch; gap: 28px; flex-wrap: wrap; }
+  /* Live chip: driven by the same streaming check that feeds the ESP32 status
+     channel, so it is a measurement rather than a decoration. */
+  .live-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--text-subtle);
+    transition: color 0.3s ease;
+  }
+  .live-chip .live-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--text-subtle); transition: background 0.3s ease;
+  }
+  .live-chip.is-live { color: var(--accent); }
+  .live-chip.is-live .live-dot {
+    background: var(--accent);
+    animation: breathe-accent 2.4s ease-in-out infinite;
+  }
+  @keyframes breathe-accent {
+    0%, 100% { box-shadow: 0 0 0 0 var(--accent-line); }
+    55%      { box-shadow: 0 0 0 4.5px transparent; }
+  }
 
-  /* The color now lives on the card itself (a state-tinted top edge) rather
-     than only on the small badge, so the state reads before you even focus
-     on the label. */
-  .prediction-card.state-empty    { box-shadow: var(--shadow-card), inset 0 3px 0 0 var(--good); }
-  .prediction-card.state-moving   { box-shadow: var(--shadow-card), inset 0 3px 0 0 var(--critical); }
-  .prediction-card.state-warming,
-  .prediction-card.state-calibrating { box-shadow: var(--shadow-card), inset 0 3px 0 0 var(--border); }
+  /* ==================== HERO — live prediction ==================== */
+  .prediction-card { padding: var(--space-5) var(--space-5) var(--space-6); }
+
+  /* A state-tinted rule along the top edge: the reading registers peripherally,
+     before the label is actually read. */
+  .prediction-card { border-top: 2px solid var(--border); transition: border-color 0.45s ease; }
+  .prediction-card.state-empty       { border-top-color: var(--success); }
+  .prediction-card.state-moving      { border-top-color: var(--danger); }
+  .prediction-card.state-calibrating { border-top-color: var(--warning); }
+  .prediction-card.state-warming     { border-top-color: var(--border-strong); }
+
+  .prediction-layout {
+    display: flex; align-items: stretch; gap: 0; flex-wrap: wrap;
+  }
 
   .status-badge {
     position: relative; overflow: hidden;
-    flex: 1 1 300px;
-    display: flex; align-items: center; justify-content: space-between; gap: 18px;
-    padding: 22px 26px; border-radius: 14px;
-    transition: background 0.3s ease, color 0.3s ease;
-    min-height: 128px;
+    flex: 1 1 420px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: var(--space-5);
+    padding: var(--space-6) var(--space-6) 56px;
+    border-radius: var(--radius-md);
+    transition: background 0.45s ease, color 0.45s ease;
+    min-height: 210px;
   }
-  .status-badge .badge-main { display: flex; flex-direction: column; gap: 6px; z-index: 1; }
-  .status-badge .badge-icon { width: 26px; height: 26px; }
-  .status-badge .badge-label { font-size: 40px; font-weight: 750; letter-spacing: -0.02em; line-height: 1; }
-  .status-badge .badge-sub { font-family: var(--font-mono); font-size: 12px; opacity: 0.85; font-weight: 500; }
 
-  .status-badge.empty  { background: var(--good-bg); color: var(--good); }
-  .status-badge.moving { background: var(--critical-bg); color: var(--critical); animation: pulse-moving 1.8s ease-in-out infinite; }
+  .status-badge .badge-main {
+    display: flex; flex-direction: column; align-items: flex-start;
+    gap: var(--space-3); z-index: 1; min-width: 0;
+  }
+  .status-badge .badge-icon { width: 30px; height: 30px; }
+
+  /* Scale is the hierarchy here: the reading should be legible across a room,
+     and nothing else on the page comes close to this size. */
+  .status-badge .badge-label {
+    font-size: clamp(46px, 7.2vw, 76px);
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    line-height: 0.92;
+    margin: 0;
+  }
+  .status-badge .badge-sub {
+    font-family: var(--font-mono);
+    font-size: 12px; font-weight: 500;
+    letter-spacing: 0.01em;
+    opacity: 0.9;
+    max-width: 44ch;
+  }
+
+  .status-badge.empty  { background: var(--success-soft); color: var(--success); }
+  .status-badge.moving { background: var(--danger-soft);  color: var(--danger); }
+
+  /* Transitional states are visually withheld: dashed edge, neutral surface,
+     the label dropped to body scale so it can never be mistaken for a reading. */
   .status-badge.warming,
   .status-badge.calibrating {
-    background: var(--surface-2); color: var(--text-secondary); border: 1px dashed var(--border);
+    background: var(--surface-sunken);
+    border: 1px dashed var(--border-strong);
+    color: var(--text-muted);
   }
+  .status-badge.calibrating { border-color: var(--warning-line); color: var(--warning); }
   .status-badge.warming .badge-label,
-  .status-badge.calibrating .badge-label { font-size: 20px; font-weight: 650; color: var(--text-primary); }
-  @keyframes pulse-moving {
-    0%, 100% { box-shadow: inset 0 0 0 0 rgba(208,59,59,0.0); }
-    50%      { box-shadow: inset 0 0 0 40px rgba(208,59,59,0.05); }
+  .status-badge.calibrating .badge-label {
+    font-size: 26px; font-weight: 650; letter-spacing: -0.015em;
+    color: var(--text);
   }
+  .status-badge.calibrating .badge-label { color: var(--warning); }
 
-  /* Waveform behind the label, redrawn each frame from the SELECTED node's
-     real motion-energy history (not decorative) - low-opacity so it reads
-     as texture, not UI. */
+  /* Progress dots, shown only while transitional. Deliberately NOT tied to a
+     percentage: the exact remaining time is already stated in the sub-line,
+     and a fake progress bar would imply precision this state does not have. */
+  .badge-progress { display: none; gap: 5px; align-items: center; }
+  .status-badge.warming .badge-progress,
+  .status-badge.calibrating .badge-progress { display: flex; }
+  .badge-progress i {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: currentColor; opacity: 0.25;
+    animation: prog 1.5s ease-in-out infinite;
+  }
+  .badge-progress i:nth-child(2) { animation-delay: 0.18s; }
+  .badge-progress i:nth-child(3) { animation-delay: 0.36s; }
+  .badge-progress i:nth-child(4) { animation-delay: 0.54s; }
+  .badge-progress i:nth-child(5) { animation-delay: 0.72s; }
+  @keyframes prog { 0%, 100% { opacity: 0.2; } 45% { opacity: 0.9; } }
+
+  /* The trace behind the label is the selected node's real motion energy. It
+     is the one ambient movement on the page, and it moves because the room is
+     moving - never on a timer. */
+  /* Masked to fade out at its top edge, and the badge reserves bottom padding
+     for it, so an energetic trace can never cut through the sub-line - which
+     it did before the mask, exactly when the room was busiest and the line
+     mattered most. */
   .badge-wave {
-    position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 34px;
-    color: currentColor; opacity: 0.45; pointer-events: none;
+    position: absolute; left: 0; right: 0; bottom: 0;
+    width: 100%; height: 42px;
+    color: currentColor; opacity: 0.32;
+    pointer-events: none;
+    transition: opacity 0.45s ease;
+    -webkit-mask-image: linear-gradient(to top, #000 45%, transparent 100%);
+            mask-image: linear-gradient(to top, #000 45%, transparent 100%);
   }
+  .status-badge.moving .badge-wave { opacity: 0.42; }
+  .status-badge.warming .badge-wave,
+  .status-badge.calibrating .badge-wave { opacity: 0.16; }
 
-  .confidence-ring-wrap { position: relative; width: 68px; height: 68px; flex: none; z-index: 1; }
-  .confidence-ring { width: 68px; height: 68px; transform: rotate(-90deg); }
-  .ring-track { fill: none; stroke: currentColor; opacity: 0.18; stroke-width: 6; }
-  .ring-fill  { fill: none; stroke: currentColor; stroke-width: 6; stroke-linecap: round; transition: stroke-dashoffset 0.35s ease; }
+  /* ---- Confidence gauge ------------------------------------------------- */
+  .confidence-ring-wrap {
+    display: flex; flex-direction: column; align-items: center; gap: 7px;
+    flex: none; z-index: 1;
+  }
+  .ring-core { position: relative; width: 92px; height: 92px; }
+  .confidence-ring { width: 92px; height: 92px; transform: rotate(-90deg); display: block; }
+  /* Thin, precise strokes and a butt cap: a measurement gauge, not a progress
+     donut. Ticks sit outside the arc like a dial face. */
+  .ring-track { fill: none; stroke: currentColor; opacity: 0.14; stroke-width: 3; }
+  .ring-fill  {
+    fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: butt;
+    transition: stroke-dashoffset 0.5s cubic-bezier(0.3, 0, 0.2, 1);
+  }
+  .ring-ticks { stroke: currentColor; opacity: 0.30; stroke-width: 1; }
   .confidence-pct {
-    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    font-family: var(--font-mono); font-size: 14px; font-weight: 700; color: currentColor;
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 21px; font-weight: 600; letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    color: currentColor;
+  }
+  /* The distinction between vote fraction and model probability is load-bearing
+     for honesty, so it is printed on the gauge rather than hidden in a title. */
+  .ring-caption {
+    font-size: 8.5px; font-weight: 650; letter-spacing: 0.11em;
+    text-transform: uppercase; text-align: center;
+    color: currentColor; opacity: 0.7; line-height: 1.35;
   }
 
-  .pred-meta { flex: 1 1 220px; display: flex; flex-direction: column; justify-content: center; gap: 10px; }
-  .meta-grid { display: grid; grid-template-columns: auto 1fr; row-gap: 8px; column-gap: 12px; font-size: 13px; margin: 0; }
-  .meta-grid dt { color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
-  .meta-grid dd { margin: 0; color: var(--text-primary); text-align: right; font-weight: 600; }
-  .raw { display: block; color: var(--text-muted); font-family: var(--font-mono); font-size: 11.5px; }
-  .pred-updated { display: block; color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+  /* ---- Technical readout column ---------------------------------------- */
+  .pred-meta {
+    flex: 0 1 260px;
+    display: flex; flex-direction: column; justify-content: center;
+    gap: var(--space-4);
+    padding-left: var(--space-6);
+    margin-left: var(--space-6);
+    border-left: 1px solid var(--border);
+  }
+  .meta-grid { display: grid; gap: var(--space-4); margin: 0; }
+  .meta-grid dt {
+    font-size: 9.5px; font-weight: 650; letter-spacing: 0.10em;
+    text-transform: uppercase; color: var(--text-subtle);
+    display: flex; align-items: center; gap: 6px; margin-bottom: 2px;
+  }
+  .meta-grid dt .icon { width: 12px; height: 12px; }
+  .meta-grid dd {
+    margin: 0; color: var(--text);
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 17px; font-weight: 500; letter-spacing: -0.01em;
+  }
+  .raw, .pred-updated {
+    display: block; color: var(--text-subtle);
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.01em;
+  }
+  .pred-updated { opacity: 0.75; }
 
   .skeleton {
-    display: inline-block; min-width: 3.6em; height: 1em; border-radius: 4px;
-    background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 50%, var(--surface-2) 75%);
-    background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite;
+    display: inline-block; min-width: 3.2em; height: 0.85em; border-radius: 3px;
+    background: linear-gradient(90deg, var(--surface-sunken) 25%, var(--border) 50%, var(--surface-sunken) 75%);
+    background-size: 200% 100%; animation: shimmer 1.6s ease-in-out infinite;
     color: transparent !important; vertical-align: middle;
   }
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
-  /* ---------------- Nodes card ---------------- */
-  .node-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-  .node-tile { background: var(--surface-2); border-radius: 10px; padding: 12px 14px; border: 1px solid transparent; }
-  .node-tile.is-selected { border-color: var(--series-1); }
-  .node-tile-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-  .node-tile-head .node-name { font-weight: 700; font-size: 13px; flex: 1; }
-  .node-view-btn {
-    font-size: 10.5px; font-weight: 600; color: var(--text-secondary);
-    background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px;
-    padding: 3px 8px; cursor: pointer;
+  /* ==================== Nodes — sensor modules ==================== */
+  .node-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: var(--space-3);
   }
-  .node-view-btn.active { color: #fff; background: var(--series-1); border-color: var(--series-1); }
 
-  /* Mute: manual override for a node that is misbehaving. A muted node stays
-     fully visible and keeps streaming - only its vote is withdrawn - so the
-     styling dims the TILE without hiding any of its live data. */
+  .node-tile {
+    position: relative;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: var(--space-4);
+    transition: border-color 0.22s ease, background 0.22s ease, opacity 0.28s ease;
+  }
+  .node-tile:hover { border-color: var(--border-strong); }
+  /* Single-node deployments: node B's tile is display:none rather than absent,
+     so :only-child cannot apply - match on the hidden sibling instead and stop
+     the lone module from stretching across the whole card. */
+  .node-tile:has(+ .node-tile.node-b-hidden) { max-width: 480px; }
+  /* Selection is structural: a solid accent rule down the module's left edge,
+     so "which signal am I looking at" is answered without reading anything. */
+  .node-tile.is-selected {
+    border-color: var(--accent-line);
+    background: var(--surface-raised);
+    box-shadow: inset 3px 0 0 0 var(--accent);
+  }
+
+  .node-tile-head {
+    display: flex; align-items: center; gap: var(--space-2);
+    margin-bottom: var(--space-3);
+  }
+  /* Node identity as a slot designator, not a colour: A and B stay structural
+     so colour can remain reserved for system state. */
+  .node-badge {
+    width: 20px; height: 20px; flex: none;
+    border-radius: 5px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-sunken);
+    color: var(--text-muted);
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    transition: color 0.22s ease, border-color 0.22s ease, background 0.22s ease;
+  }
+  .node-tile.is-selected .node-badge {
+    color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft);
+  }
+  .node-tile-head .node-name {
+    font-size: 10px; font-weight: 650; letter-spacing: 0.10em;
+    text-transform: uppercase; color: var(--text-muted); flex: 1;
+  }
+
+  .node-view-btn {
+    font-family: var(--font-sans);
+    font-size: 9.5px; font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--text-subtle);
+    background: transparent; border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 4px 9px; cursor: pointer;
+    transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+  }
+  .node-view-btn:hover { color: var(--text); border-color: var(--border-strong); }
+  .node-view-btn.active {
+    color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft);
+  }
+  .node-view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* The three "not contributing" conditions are genuinely different and must
+     never collapse into one look: OFFLINE is a fault, MUTED is an operator
+     decision, WARMING UP is simply not knowing yet. */
+  .node-status {
+    font-size: 22px; font-weight: 650; letter-spacing: -0.02em;
+    color: var(--text-muted);
+    margin-bottom: var(--space-3); line-height: 1.15;
+  }
+  .node-status.moving { color: var(--danger); }
+  .node-status.empty  { color: var(--success); }
+
+  .node-meta {
+    display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3);
+    margin: 0 0 var(--space-3);
+  }
+  .node-meta dt {
+    font-size: 9px; font-weight: 650; letter-spacing: 0.10em;
+    text-transform: uppercase; color: var(--text-subtle); margin-bottom: 2px;
+  }
+  .node-meta dd {
+    margin: 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 14px; font-weight: 500; color: var(--text);
+  }
+
+  /* Reception bar. --signal is written from the node's real RSSI; with no
+     frames yet it stays at 0 rather than showing an invented level. */
+  .node-signal { margin-bottom: var(--space-3); }
+  .node-signal-track {
+    height: 3px; border-radius: 2px; background: var(--border); overflow: hidden;
+  }
+  .node-signal-fill {
+    height: 100%; width: var(--signal, 0%);
+    background: var(--accent); border-radius: 2px;
+    transition: width 0.6s cubic-bezier(0.3, 0, 0.2, 1);
+  }
+  .node-signal .eyebrow { display: block; margin-top: 5px; font-size: 9px; }
+
   .node-mute-btn {
-    display: inline-flex; align-items: center; gap: 6px; margin-top: 10px;
-    font-size: 11px; font-weight: 600; color: var(--text-secondary);
-    background: var(--surface-1); border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 9px; cursor: pointer; width: 100%;
-    justify-content: center;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    width: 100%;
+    font-family: var(--font-sans);
+    font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-subtle);
+    background: transparent; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 7px 10px; cursor: pointer;
+    transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
   }
-  .node-mute-btn:hover { border-color: var(--text-secondary); color: var(--text-primary); }
-  .node-mute-btn .icon { width: 13px; height: 13px; }
-  .node-tile.is-muted .node-mute-btn {
-    color: #fff; background: var(--warn); border-color: var(--warn);
+  .node-mute-btn:hover { color: var(--text); border-color: var(--border-strong); }
+  .node-mute-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .node-mute-btn .icon { width: 12px; height: 12px; }
+
+  /* Muted: desaturated and dimmed so it visibly falls out of the vote - but
+     still fully readable, because the node is still streaming and the operator
+     needs to watch it in order to decide when to bring it back. */
+  .node-tile.is-muted {
+    background: var(--surface-sunken);
+    border-color: var(--warning-line);
+    box-shadow: inset 3px 0 0 0 var(--warning);
   }
-  /* Dim the readouts, not the whole tile, so live data stays legible. */
   .node-tile.is-muted .node-status,
-  .node-tile.is-muted .node-meta { opacity: 0.55; }
+  .node-tile.is-muted .node-meta,
+  .node-tile.is-muted .node-signal { opacity: 0.5; filter: saturate(0.35); }
+  .node-tile.is-muted .node-mute-btn {
+    color: var(--warning); border-color: var(--warning-line); background: var(--warning-soft);
+  }
   .node-muted-flag {
-    display: none; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em;
-    text-transform: uppercase; color: var(--warn-text); background: var(--warn-bg);
-    border-radius: 4px; padding: 2px 6px; margin-bottom: 6px;
+    display: none;
+    font-size: 9px; font-weight: 700; letter-spacing: 0.10em; text-transform: uppercase;
+    color: var(--warning); background: var(--warning-soft);
+    border: 1px solid var(--warning-line);
+    border-radius: 4px; padding: 2px 6px; margin-bottom: var(--space-2);
   }
   .node-tile.is-muted .node-muted-flag { display: inline-block; }
-  .node-status { font-size: 13px; font-weight: 650; margin-bottom: 8px; }
-  .node-status.moving { color: var(--critical); }
-  .node-status.empty { color: var(--good); }
-  .node-meta { font-size: 12px; }
-  .node-meta dd { font-family: var(--font-mono); }
 
-  /* ---------------- Session summary ---------------- */
-  .session-meta { max-width: 460px; }
-  .session-meta dd { font-family: var(--font-mono); font-size: 15px; }
-
-  .occ-track { height: 6px; border-radius: 3px; background: var(--critical-bg); margin-top: 14px; overflow: hidden; display: flex; }
-  .occ-fill { background: var(--critical); height: 100%; transition: width 0.4s ease; border-radius: 3px; }
-
-  /* ---------------- Calibration ---------------- */
-  .calib-node-head { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; margin-bottom: 8px; }
-  .stat-row { display: flex; gap: 10px; flex-wrap: wrap; }
-  .stat-tile { flex: 1 1 120px; background: var(--surface-2); border-radius: 10px; padding: 10px 12px; }
-  .stat-tile .label { font-size: 10.5px; color: var(--text-secondary); margin-bottom: 5px; }
-  .stat-tile .value { font-family: var(--font-mono); font-size: 15px; font-weight: 700; }
-
-  /* Noise floor: a status readout, so it uses the reserved status colors
-     (good/warning/critical) rather than any series color, and always pairs
-     the color with a word - never color alone. */
-  .stat-tile .value .noise-label { font-family: system-ui, sans-serif; font-size: 11px; font-weight: 600; display: block; margin-top: 2px; }
-  .stat-tile.noise-quiet .value { color: var(--good); }
-  .stat-tile.noise-moderate .value { color: var(--warn); }
-  .stat-tile.noise-loud .value { color: var(--bad); }
-  .stat-tile.noise-loud { box-shadow: inset 0 0 0 1px var(--bad); }
-
-  /* Reception disparity between nodes - a different problem from a noisy
-     room (antenna/placement, not environment), so it gets its own line. */
-  .signal-compare-note {
-    margin: 12px 0 0; padding: 10px 12px; border-radius: 8px;
-    background: var(--warn-bg); color: var(--warn-text);
-    font-size: 12px; line-height: 1.5;
-    box-shadow: inset 0 0 0 1px var(--warn);
-  }
-
-  .recal-log { margin: 10px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--text-secondary); max-height: 120px; overflow-y: auto; }
-  .recal-log li { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border-radius: 6px; font-family: var(--font-mono); }
-  .recal-log li:nth-child(odd) { background: var(--surface-2); }
-  .recal-log:empty::after { content: 'No recalibrations yet.'; color: var(--text-muted); font-size: 12px; font-family: system-ui, sans-serif; }
-
-  .btn-secondary {
-    display: inline-flex; align-items: center; gap: 7px;
-    background: var(--surface-2); border: 1px solid var(--border); color: var(--text-primary);
-    font-size: 12.5px; font-weight: 600; padding: 8px 14px; border-radius: 9px; cursor: pointer;
-    margin-top: 10px; transition: background 0.15s, border-color 0.15s;
-  }
-  .btn-secondary:hover { background: var(--surface-3); border-color: var(--text-secondary); }
-
-  /* ---------------- Signal card (waterfall + energy, unified) ---------------- */
-  .node-switch { display: flex; gap: 6px; margin-left: auto; }
+  /* ==================== Signal — the instrument viewport ==================== */
+  .node-switch { display: flex; gap: 5px; margin-left: auto; }
   .node-switch-btn {
-    font-size: 11.5px; font-weight: 600; color: var(--text-secondary);
-    background: var(--surface-2); border: 1px solid var(--border); border-radius: 7px;
-    padding: 5px 10px; cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em;
+    color: var(--text-subtle);
+    background: transparent; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 5px 11px; cursor: pointer;
+    transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
   }
-  .node-switch-btn.active { color: #fff; background: var(--series-1); border-color: var(--series-1); }
+  .node-switch-btn:hover { color: var(--text); border-color: var(--border-strong); }
+  .node-switch-btn.active {
+    color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft);
+  }
+  .node-switch-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .panel-label {
     display: flex; align-items: center; gap: 7px;
-    font-size: 11px; font-weight: 700; color: var(--text-secondary);
-    text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 10px;
+    font-size: 9.5px; font-weight: 650; letter-spacing: 0.11em;
+    text-transform: uppercase; color: var(--text-subtle);
+    margin-bottom: var(--space-2);
   }
-  .signal-divider { height: 1px; background: var(--border); margin: 20px 0; }
+  .panel-label .icon { width: 12px; height: 12px; }
+  .signal-divider { height: 1px; background: var(--border); margin: var(--space-6) 0; }
+  .signal-panel .desc { margin-bottom: var(--space-3); }
+
+  /* The screen housing. Corner ticks are registration marks, the one piece of
+     ornament kept, because they read as measurement rather than decoration. */
+  .viewport {
+    position: relative;
+    background: var(--inst-bg);
+    border: 1px solid var(--inst-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+    overflow: hidden;
+  }
+  .viewport::before,
+  .viewport::after {
+    content: '';
+    position: absolute; width: 9px; height: 9px;
+    border-color: var(--inst-border); border-style: solid; border-width: 0;
+    pointer-events: none;
+  }
+  .viewport::before { top: 6px;    left: 6px;  border-top-width: 1px; border-left-width: 1px; }
+  .viewport::after  { bottom: 6px; right: 6px; border-bottom-width: 1px; border-right-width: 1px; }
 
   .wf-holder { position: relative; }
+  /* Never faded in. The waterfall is the primary visualization, and gating it
+     behind an opacity transition means any environment that does not run the
+     transition leaves the user staring at a blank screen with live data behind
+     it. Its unlit state is simply the dark surface, which is what an
+     instrument with no input should look like anyway. */
   canvas#waterfall {
-    display: block; width: 100%; height: 200px;
-    border-radius: 10px; image-rendering: pixelated;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
+    display: block; width: 100%; height: 240px;
+    border-radius: 5px;
+    image-rendering: pixelated;
+    background: var(--seq-lo);
   }
-  .wf-axis-labels { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); margin-top: 6px; }
-  .wf-legend { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 11px; color: var(--text-muted); }
-  .wf-ramp { flex: 1; height: 8px; border-radius: 4px; background: linear-gradient(to right, var(--seq-lo), var(--seq-hi)); max-width: 240px; }
 
+  /* Explicit "no signal" state rather than a blank rectangle - the page should
+     always account for itself. Removed with display:none rather than opacity
+     so it cannot linger on top of live data. */
+  .wf-empty {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 9px; pointer-events: none;
+    background: var(--inst-bg);
+    border-radius: 5px;
+  }
+  .wf-holder.has-data .wf-empty { display: none; }
+  .wf-empty .wf-empty-title {
+    font-size: 10px; font-weight: 650; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--inst-text-bright);
+  }
+  .wf-empty .wf-empty-sub {
+    font-family: var(--font-mono); font-size: 11px; color: var(--inst-text);
+  }
+  .wf-scan {
+    width: 108px; height: 1px; background: var(--inst-accent);
+    opacity: 0.5; animation: scan 2.1s ease-in-out infinite;
+  }
+  @keyframes scan {
+    0%, 100% { transform: scaleX(0.25); opacity: 0.25; }
+    50%      { transform: scaleX(1);    opacity: 0.65; }
+  }
+
+  .wf-axis-labels {
+    display: flex; justify-content: space-between;
+    font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.05em;
+    color: var(--inst-text); margin-top: var(--space-2); padding: 0 2px;
+  }
+  .wf-legend {
+    display: flex; align-items: center; gap: var(--space-2);
+    margin-top: var(--space-3); padding: 0 2px;
+    font-family: var(--font-mono); font-size: 9.5px; color: var(--inst-text);
+  }
+  .wf-ramp {
+    flex: 1; height: 4px; border-radius: 2px; max-width: 260px;
+    background: linear-gradient(to right, var(--seq-lo), var(--seq-mid), var(--seq-hi));
+  }
+
+  /* ---- Motion energy: oscilloscope trace, same housing ------------------ */
   .chart-holder { position: relative; }
   svg#energy { display: block; overflow: visible; }
-  .tick-label { fill: var(--text-muted); font: 11px var(--font-mono); }
-  .axis-label { fill: var(--text-muted); font: 10.5px var(--font-mono); }
-  .gridline { stroke: var(--grid); stroke-width: 1; }
-  .baseline-line { stroke: var(--baseline); stroke-width: 1; }
-  .energy-path { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-  .energy-area { fill: var(--series-1); opacity: 0.10; }
-  .energy-endpoint { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
+  .tick-label   { fill: var(--inst-text); font: 9.5px var(--font-mono); }
+  .axis-label   { fill: var(--inst-text); font: 9.5px var(--font-mono); letter-spacing: 0.05em; }
+  .gridline     { stroke: var(--inst-grid); stroke-width: 1; }
+  .baseline-line{ stroke: var(--inst-baseline); stroke-width: 1; }
+  .energy-path  { fill: none; stroke: var(--inst-accent); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+  .energy-area  { fill: var(--inst-accent); opacity: 0.11; }
+  .energy-endpoint { fill: var(--inst-accent); stroke: var(--inst-bg); stroke-width: 2; }
+  .energy-readout  { fill: var(--inst-text-bright); font: 600 11px var(--font-mono); }
 
-  .chart-legend { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--text-secondary); margin-top: 4px; }
-  .chart-legend .swatch { width: 10px; height: 10px; border-radius: 3px; background: var(--series-1); flex: none; }
+  .chart-legend {
+    display: flex; align-items: center; gap: 7px; margin-top: var(--space-2); padding: 0 2px;
+    font-family: var(--font-mono); font-size: 9.5px; color: var(--inst-text);
+  }
+  .chart-legend .swatch {
+    width: 8px; height: 2px; border-radius: 1px; background: var(--inst-accent); flex: none;
+  }
 
   .chart-tooltip {
     position: absolute; pointer-events: none;
-    background: var(--text-primary); color: var(--surface-1);
-    font-family: var(--font-mono); font-size: 12px; padding: 5px 9px; border-radius: 7px;
-    transform: translate(-50%, calc(-100% - 8px)); opacity: 0; transition: opacity 0.1s;
-    white-space: nowrap; z-index: 5;
+    background: rgba(7,14,25,0.94);
+    border: 1px solid var(--inst-border);
+    color: var(--inst-text-bright);
+    font-family: var(--font-mono); font-size: 11px;
+    padding: 6px 9px; border-radius: var(--radius-sm);
+    transform: translate(-50%, calc(-100% - 10px));
+    opacity: 0; transition: opacity 0.14s ease, transform 0.14s ease;
+    white-space: pre; z-index: 5; line-height: 1.45;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.4);
   }
-  .chart-tooltip.show { opacity: 1; }
+  .chart-tooltip.show { opacity: 1; transform: translate(-50%, calc(-100% - 6px)); }
+  .chart-tooltip b {
+    display: block; font-weight: 650; font-size: 8.5px; letter-spacing: 0.11em;
+    text-transform: uppercase; color: var(--inst-text); margin-bottom: 2px;
+  }
 
-  /* ---------------- Responsive ---------------- */
+  /* ==================== Session summary ==================== */
+  /* Fixed three columns rather than auto-fit: five stats across an auto-fit
+     grid land as an awkward 4 + 1, whereas 3 + 2 reads as a deliberate block. */
+  .session-meta {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-5) var(--space-3); margin: 0;
+  }
+  .session-meta dt {
+    font-size: 9px; font-weight: 650; letter-spacing: 0.10em; text-transform: uppercase;
+    color: var(--text-subtle); display: flex; align-items: center; gap: 5px;
+    margin-bottom: 4px; order: 2;
+  }
+  .session-meta dt .icon { width: 11px; height: 11px; }
+  .session-meta dd {
+    margin: 0 0 2px;
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 22px; font-weight: 500; letter-spacing: -0.03em; color: var(--text);
+    order: 1; line-height: 1.1;
+  }
+  .session-stat { display: flex; flex-direction: column; }
+  .session-meta .unit { font-size: 13px; color: var(--text-subtle); margin-left: 1px; }
+
+  .occ-track {
+    height: 3px; border-radius: 2px; background: var(--border);
+    margin-top: var(--space-5); overflow: hidden; display: flex;
+  }
+  .occ-fill {
+    background: var(--danger); height: 100%; border-radius: 2px;
+    transition: width 0.6s cubic-bezier(0.3, 0, 0.2, 1);
+  }
+  .occ-caption {
+    display: flex; justify-content: space-between; margin-top: 6px;
+    font-family: var(--font-mono); font-size: 9.5px; color: var(--text-subtle);
+  }
+
+  /* ==================== Calibration ==================== */
+  .calib-node + .calib-node { margin-top: var(--space-5); }
+  .calib-node-head {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 10px; font-weight: 650; letter-spacing: 0.10em; text-transform: uppercase;
+    color: var(--text-muted); margin-bottom: var(--space-3);
+  }
+
+  /* ---- Noise floor meter ------------------------------------------------
+     The distinguishing measurement of this system, so it gets a scale rather
+     than a bare number: the bar shows where the room sits between the two
+     thresholds this project derived from its own recordings, and the exact
+     figure stays available beside it for anyone who wants it. */
+  /* The noise module spans the row. Targeted by ID rather than by class,
+     because the renderer rewrites this element's className wholesale to carry
+     the grade (`stat-tile noise-loud`), which would drop any extra class. */
+  #noise-tile-A, #noise-tile-B { grid-column: 1 / -1; }
+
+  /* color:inherit is load-bearing. This element also carries `.value`, whose
+     `color: var(--text)` is more specific than the class rules below and would
+     otherwise pin the figure, the word and the meter to plain body text - so
+     the grade would be computed, stored and then thrown away. The ID selector
+     outranks it and lets the tile's grade colour flow down through
+     currentColor. */
+  #noise-A, #noise-B { display: block; color: inherit; }
+  .noise-figure {
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 26px; font-weight: 500; letter-spacing: -0.03em;
+    line-height: 1; color: currentColor;
+  }
+  .noise-label {
+    font-family: var(--font-sans);
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.11em; text-transform: uppercase;
+    color: currentColor; margin-left: var(--space-2);
+  }
+  .noise-meter {
+    position: relative; height: 4px; border-radius: 2px;
+    background: var(--border); overflow: visible;
+    margin-top: var(--space-3);
+  }
+  .noise-meter-fill {
+    height: 100%; border-radius: 2px; background: currentColor;
+    width: var(--noise, 0%);
+    transition: width 0.6s cubic-bezier(0.3, 0, 0.2, 1);
+  }
+  /* Threshold marks at the two graded boundaries this project derived from its
+     own recordings - 0.06 and 0.15 on a 0-0.30 scale - so the bar is
+     interpretable without consulting the docs. */
+  .noise-meter i {
+    position: absolute; top: -3px; width: 1px; height: 10px;
+    background: var(--border-strong);
+  }
+  .noise-meter i:nth-of-type(1) { left: 20%; }
+  .noise-meter i:nth-of-type(2) { left: 50%; }
+  .noise-scale {
+    display: grid; grid-template-columns: 20% 30% 50%;
+    margin-top: 7px;
+    font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.07em;
+    color: var(--text-subtle); text-transform: uppercase;
+  }
+
+  /* The grade colours the whole module through `currentColor`, so figure,
+     word and meter can never disagree with each other. */
+  .stat-tile.noise-quiet    { color: var(--success); }
+  .stat-tile.noise-moderate { color: var(--warning); }
+  .stat-tile.noise-loud     { color: var(--danger); }
+  /* A loud room is a risk indicator, not a failure - so the module is outlined
+     and tinted, never flashed. */
+  .stat-tile.noise-loud {
+    border-color: var(--danger-line);
+    background: var(--danger-soft);
+  }
+
+  .stat-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+    gap: var(--space-3);
+  }
+  .stat-tile {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-4);
+  }
+  .stat-tile .label {
+    font-size: 9px; font-weight: 650; letter-spacing: 0.10em; text-transform: uppercase;
+    color: var(--text-subtle); margin-bottom: 5px;
+  }
+  .stat-tile .value {
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 15px; font-weight: 500; color: var(--text);
+  }
+
+  .btn-secondary {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: transparent; border: 1px solid var(--border); color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer;
+    margin-top: var(--space-3); width: 100%; justify-content: center;
+    transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+  }
+  .btn-secondary:hover { color: var(--text); border-color: var(--border-strong); background: var(--surface-raised); }
+  .btn-secondary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn-secondary .icon { width: 13px; height: 13px; }
+
+  /* ---- Signal balance diagnostic ---------------------------------------- */
+  /* A reception disparity is a different fault from a noisy room - antenna or
+     placement rather than environment - so it is presented as its own read
+     observation with the two amplitudes drawn to scale. */
+  .signal-compare-note {
+    margin: var(--space-4) 0 0;
+    padding: var(--space-3) var(--space-4) var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--warning-soft);
+    border: 1px solid var(--warning-line);
+    border-left: 3px solid var(--warning);
+    font-size: 12px; line-height: 1.55; color: var(--text-muted);
+  }
+  .signal-compare-note .sb-title {
+    display: block;
+    font-size: 9px; font-weight: 700; letter-spacing: 0.11em; text-transform: uppercase;
+    color: var(--warning); margin-bottom: var(--space-2);
+  }
+  .signal-compare-note .sb-lead { color: var(--text); font-weight: 500; }
+  .sb-bars {
+    display: grid; grid-template-columns: auto 1fr auto;
+    gap: 5px var(--space-2); align-items: center;
+    margin: var(--space-3) 0;
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted);
+  }
+  .sb-bars .sb-track { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+  /* display:block because these are spans (the grid blockifies .sb-track, but
+     the fill inside it is an ordinary inline child). */
+  .sb-bars .sb-fill  { display: block; height: 100%; background: var(--warning); border-radius: 2px; }
+  .sb-bars .sb-fill.is-strong { background: var(--accent); }
+  .sb-bars .sb-val   { font-variant-numeric: tabular-nums; color: var(--text); }
+
+  /* ---- Recalibration log ------------------------------------------------ */
+  .recal-log {
+    margin: var(--space-4) 0 0; padding: 0; list-style: none;
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted);
+    max-height: 148px; overflow-y: auto;
+    border-top: 1px solid var(--border);
+  }
+  .recal-log li {
+    display: grid; grid-template-columns: auto auto 1fr auto;
+    gap: var(--space-3); align-items: center;
+    padding: 7px 2px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .recal-log li:last-child { border-bottom: 0; }
+  .recal-log .rl-time  { color: var(--text); font-variant-numeric: tabular-nums; }
+  .recal-log .rl-node  { color: var(--text-subtle); letter-spacing: 0.06em; }
+  .recal-log .rl-event { color: var(--text-subtle); }
+  .recal-log .rl-noise { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .recal-log:empty {
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-3);
+  }
+  .recal-log:empty::after {
+    content: 'No recalibrations yet.';
+    color: var(--text-subtle); font-family: var(--font-sans); font-size: 12px;
+  }
+
+  /* ==================== Responsive ==================== */
+  /* Not a shrink: the hero keeps its scale and the technical readout moves
+     below it as a row, because the one-second question on a phone is still
+     "is someone there". */
+  @media (max-width: 900px) {
+    .pred-meta {
+      flex: 1 1 100%;
+      padding-left: 0; margin-left: 0;
+      border-left: 0; border-top: 1px solid var(--border);
+      padding-top: var(--space-5); margin-top: var(--space-4);
+    }
+    .meta-grid { grid-template-columns: repeat(3, 1fr); gap: var(--space-4); }
+  }
+
   @media (max-width: 640px) {
-    .wrap { padding: 14px 12px 40px; }
-    .topbar { padding: 10px 2px 14px; }
-    .prediction-layout { flex-direction: column; }
-    .status-badge { min-height: 110px; }
-    .card { padding: 16px 16px 18px; }
-    .badge-label { font-size: 30px !important; }
+    body { font-size: 13.5px; }
+    .wrap { padding: var(--space-3) var(--space-3) 48px; }
+    .topbar {
+      align-items: flex-start; gap: var(--space-3);
+      padding: var(--space-2) 0 var(--space-4); margin-bottom: var(--space-4);
+    }
+    .topbar-right { width: 100%; justify-content: space-between; gap: var(--space-3); }
+    .status-pills { width: 100%; flex-wrap: wrap; }
+    .pill { flex: 1 1 46%; min-width: 0; border-bottom: 1px solid var(--border); }
+    .pill:nth-last-child(-n+2) { border-bottom: 0; }
+    .pill:nth-child(2n) { border-right: 0; }
+
+    .card { padding: var(--space-4) var(--space-4) var(--space-5); border-radius: 14px; }
+    .dashboard-grid { gap: var(--space-3); grid-template-columns: 1fr; }
+
+    .status-badge {
+      flex-direction: column; align-items: flex-start; gap: var(--space-5);
+      padding: var(--space-5) var(--space-4) var(--space-6);
+      min-height: 0;
+    }
+    .status-badge .badge-label { font-size: clamp(42px, 15vw, 60px); }
+    .status-badge.warming .badge-label,
+    .status-badge.calibrating .badge-label { font-size: 22px; }
+    /* Gauge sits inline under the reading, still legible, no longer dominant. */
+    .confidence-ring-wrap { flex-direction: row; gap: var(--space-3); align-self: flex-start; }
+    .ring-core, .confidence-ring { width: 62px; height: 62px; }
+    .confidence-pct { font-size: 15px; }
+    .ring-caption { text-align: left; }
+
+    .meta-grid { grid-template-columns: 1fr 1fr; }
+    .meta-grid dd { font-size: 15px; }
+
+    canvas#waterfall { height: 190px; }
+    .node-grid { grid-template-columns: 1fr; }
+    .node-switch { margin-left: 0; width: 100%; }
+    .node-switch-btn { flex: 1; }
     .card-head { flex-wrap: wrap; }
-    .node-switch { margin-left: 0; }
+    .head-rule { display: none; }
+    .session-meta { grid-template-columns: repeat(2, 1fr); }
+    .recal-log li { grid-template-columns: auto auto 1fr; }
+    .recal-log .rl-event { display: none; }
   }
 </style>
 </head>
@@ -439,8 +1241,8 @@
   <header class="topbar">
     <div class="brand">
       <div class="brand-mark">
-        <svg class="icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 10a11 11 0 0 1 16 0"/><path d="M7.5 13.5a6.5 6.5 0 0 1 9 0"/><path d="M11 17a2 2 0 0 1 2 0"/><circle cx="12" cy="19" r="0.6" fill="currentColor" stroke="none"/>
+        <svg class="icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 10a11 11 0 0 1 16 0"/><path d="M7.5 13.5a6.5 6.5 0 0 1 9 0"/><path d="M11 17a2 2 0 0 1 2 0"/><circle cx="12" cy="19" r="0.7" fill="currentColor" stroke="none"/>
         </svg>
       </div>
       <div>
@@ -451,33 +1253,35 @@
     <div class="topbar-right">
       <div class="status-pills">
         <div class="pill" id="pill-ws" title="Dashboard ↔ server WebSocket">
-          <span class="pill-dot" id="conn-dot"></span>
-          <span id="conn-text">Connecting…</span>
+          <span class="pill-label">Link</span>
+          <span class="pill-state"><span class="pill-dot" id="conn-dot"></span><span id="conn-text">Connecting…</span></span>
         </div>
         <div class="pill" id="pill-esp" title="ESP32 CSI stream (selected node)">
-          <span class="pill-dot" id="esp-dot"></span>
-          <span id="esp-status-text">No signal</span>
+          <span class="pill-label">RF Field</span>
+          <span class="pill-state"><span class="pill-dot" id="esp-dot"></span><span id="esp-status-text">No signal</span></span>
         </div>
         <div class="pill" id="pill-model" title="Model on the server">
-          <span class="pill-dot" id="model-dot"></span>
-          <span id="model-status-text">Loading</span>
+          <span class="pill-label">Model</span>
+          <span class="pill-state"><span class="pill-dot" id="model-dot"></span><span id="model-status-text">Loading</span></span>
         </div>
         <div class="pill" id="pill-calib" title="Calibration state (all nodes)">
-          <span class="pill-dot" id="calib-dot"></span>
-          <span id="calib-status-text">–</span>
+          <span class="pill-label">Baseline</span>
+          <span class="pill-state"><span class="pill-dot" id="calib-dot"></span><span id="calib-status-text">–</span></span>
         </div>
       </div>
       <span class="clock" id="current-time">–</span>
       <button class="theme-btn" id="theme-btn" title="Cycle theme">
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
         <span id="theme-btn-label">Auto</span>
       </button>
     </div>
   </header>
 
-  <div class="banner" id="banner">
-    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
-    <span id="banner-text"></span>
+  <!-- Condition stack, built by renderConditions(). #banner-text is kept as an
+       off-screen live region so assistive tech announces the newest condition
+       without having to walk the visual stack. -->
+  <div class="banner" id="banner" role="region" aria-label="System conditions">
+    <span id="banner-text" class="sr-only" role="status" aria-live="polite"></span>
   </div>
 
   <main class="dashboard-grid">
@@ -486,6 +1290,8 @@
       <div class="card-head">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>
         <h2>Live prediction</h2>
+        <span class="head-rule"></span>
+        <span class="live-chip" id="hero-live"><span class="live-dot"></span>Live</span>
       </div>
       <div class="prediction-layout">
         <div class="status-badge warming" id="status-badge">
@@ -494,23 +1300,44 @@
             <svg class="badge-icon" id="badge-icon" viewBox="0 0 24 24"></svg>
             <span class="badge-label" id="badge-label">Warming up…</span>
             <span class="badge-sub" id="badge-sub"></span>
+            <span class="badge-progress" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
           </div>
           <div class="confidence-ring-wrap" id="confidence-ring-wrap" style="visibility:hidden;">
-            <svg class="confidence-ring" viewBox="0 0 72 72">
-              <circle class="ring-track" cx="36" cy="36" r="30"/>
-              <circle class="ring-fill" id="confidence-ring-fill" cx="36" cy="36" r="30"/>
-            </svg>
-            <span class="confidence-pct" id="confidence-pct">–</span>
+            <div class="ring-core">
+              <svg class="confidence-ring" viewBox="0 0 72 72">
+                <g class="ring-ticks">
+                  <line x1="36" y1="2.5" x2="36" y2="7"/>
+                  <line x1="69.5" y1="36" x2="65" y2="36"/>
+                  <line x1="36" y1="69.5" x2="36" y2="65"/>
+                  <line x1="2.5" y1="36" x2="7" y2="36"/>
+                </g>
+                <circle class="ring-track" cx="36" cy="36" r="30"/>
+                <circle class="ring-fill" id="confidence-ring-fill" cx="36" cy="36" r="30"/>
+              </svg>
+              <span class="confidence-pct" id="confidence-pct">–</span>
+            </div>
+            <span class="ring-caption">Vote fraction<br>last 5 windows</span>
           </div>
         </div>
         <div class="pred-meta">
           <dl class="meta-grid">
-            <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a11 11 0 0 1 16 0"/><path d="M7.5 13.5a6.5 6.5 0 0 1 9 0"/><circle cx="12" cy="18" r="0.7" fill="currentColor" stroke="none"/></svg>RSSI (viewed node)</dt><dd class="mono skeleton" id="meta-rssi">–</dd>
-            <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>Motion energy</dt><dd class="mono skeleton" id="meta-energy">–</dd>
-            <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>Buffer</dt><dd class="mono skeleton" id="meta-buffer">–</dd>
+            <div class="meta-item">
+              <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a11 11 0 0 1 16 0"/><path d="M7.5 13.5a6.5 6.5 0 0 1 9 0"/><circle cx="12" cy="18" r="0.7" fill="currentColor" stroke="none"/></svg>RSSI · viewed node</dt>
+              <dd class="mono skeleton" id="meta-rssi">–</dd>
+            </div>
+            <div class="meta-item">
+              <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>Motion energy</dt>
+              <dd class="mono skeleton" id="meta-energy">–</dd>
+            </div>
+            <div class="meta-item">
+              <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>Window buffer</dt>
+              <dd class="mono skeleton" id="meta-buffer">–</dd>
+            </div>
           </dl>
-          <span class="raw" id="meta-raw"></span>
-          <span class="pred-updated" id="pred-updated"></span>
+          <div>
+            <span class="raw" id="meta-raw"></span>
+            <span class="pred-updated" id="pred-updated"></span>
+          </div>
         </div>
       </div>
     </section>
@@ -518,22 +1345,28 @@
     <section class="card span-full" id="nodes-card">
       <div class="card-head">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.2"/><circle cx="19" cy="6" r="2.2"/><circle cx="19" cy="18" r="2.2"/><path d="M7 12h6M12 12l5-4.5M12 12l5 4.5"/></svg>
-        <h2>Nodes</h2>
+        <h2>Sensor nodes</h2>
+        <span class="head-rule"></span>
       </div>
       <p class="desc">Each node calibrates and predicts completely independently. The prediction above is OR'd across all nodes shown here — either one confirming MOVING is enough, which is what lets a second node catch movement the first one's off-axis blind spot would otherwise miss.</p>
       <div class="node-grid">
         <div class="node-tile is-selected" id="tile-A" data-node="A">
           <div class="node-tile-head">
-            <span class="pill-dot" id="node-dot-A"></span>
+            <span class="node-badge">A</span>
             <span class="node-name">Node A</span>
+            <span class="pill-dot" id="node-dot-A"></span>
             <button class="node-view-btn active" data-node="A">Viewing</button>
           </div>
-          <span class="node-muted-flag" id="node-muted-flag-A">muted — not counted</span>
+          <span class="node-muted-flag" id="node-muted-flag-A">Muted — not counted</span>
           <div class="node-status" id="node-status-A">warming up…</div>
           <dl class="meta-grid node-meta">
-            <dt>RSSI</dt><dd class="mono" id="node-rssi-A">–</dd>
-            <dt>Energy</dt><dd class="mono" id="node-energy-A">–</dd>
+            <div><dt>RSSI</dt><dd class="mono" id="node-rssi-A">–</dd></div>
+            <div><dt>Energy</dt><dd class="mono" id="node-energy-A">–</dd></div>
           </dl>
+          <div class="node-signal">
+            <div class="node-signal-track"><div class="node-signal-fill"></div></div>
+            <span class="eyebrow">Reception</span>
+          </div>
           <button class="node-mute-btn" data-mute-node="A" id="mute-btn-A"
                   title="Stop this node affecting the prediction above. It keeps streaming and stays visible — it just stops voting.">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="m23 9-6 6M17 9l6 6"/></svg>
@@ -542,16 +1375,21 @@
         </div>
         <div class="node-tile node-b-hidden" id="tile-B" data-node="B">
           <div class="node-tile-head">
-            <span class="pill-dot" id="node-dot-B"></span>
+            <span class="node-badge">B</span>
             <span class="node-name">Node B</span>
+            <span class="pill-dot" id="node-dot-B"></span>
             <button class="node-view-btn" data-node="B">View</button>
           </div>
-          <span class="node-muted-flag" id="node-muted-flag-B">muted — not counted</span>
+          <span class="node-muted-flag" id="node-muted-flag-B">Muted — not counted</span>
           <div class="node-status" id="node-status-B">warming up…</div>
           <dl class="meta-grid node-meta">
-            <dt>RSSI</dt><dd class="mono" id="node-rssi-B">–</dd>
-            <dt>Energy</dt><dd class="mono" id="node-energy-B">–</dd>
+            <div><dt>RSSI</dt><dd class="mono" id="node-rssi-B">–</dd></div>
+            <div><dt>Energy</dt><dd class="mono" id="node-energy-B">–</dd></div>
           </dl>
+          <div class="node-signal">
+            <div class="node-signal-track"><div class="node-signal-fill"></div></div>
+            <span class="eyebrow">Reception</span>
+          </div>
           <button class="node-mute-btn" data-mute-node="B" id="mute-btn-B"
                   title="Stop this node affecting the prediction above. It keeps streaming and stays visible — it just stops voting.">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="m23 9-6 6M17 9l6 6"/></svg>
@@ -565,6 +1403,7 @@
       <div class="card-head">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         <h2>Signal</h2>
+        <span class="head-rule"></span>
         <div class="node-switch" id="signal-node-switch">
           <button class="node-switch-btn active" data-node="A">Node A</button>
           <button class="node-switch-btn node-b-hidden" data-node="B">Node B</button>
@@ -576,15 +1415,22 @@
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
           Waterfall
         </div>
-        <p class="desc">Amplitude per subcarrier over time, newest row at the bottom, for the node selected above.</p>
-        <div class="wf-holder">
-          <canvas id="waterfall"></canvas>
-        </div>
-        <div class="wf-axis-labels"><span>subcarrier index →</span><span>↓ time (newest at bottom)</span></div>
-        <div class="wf-legend">
-          <span>low amplitude</span>
-          <div class="wf-ramp"></div>
-          <span>high amplitude</span>
+        <p class="desc">Amplitude per subcarrier over time, newest row at the bottom, for the node selected above. A still room draws smooth horizontal banding; a person moving breaks it up.</p>
+        <div class="viewport">
+          <div class="wf-holder" id="wf-holder">
+            <canvas id="waterfall"></canvas>
+            <div class="wf-empty">
+              <span class="wf-empty-title">No signal</span>
+              <div class="wf-scan"></div>
+              <span class="wf-empty-sub">waiting for CSI frames…</span>
+            </div>
+          </div>
+          <div class="wf-axis-labels"><span>subcarrier index →</span><span>↓ time · newest at bottom</span></div>
+          <div class="wf-legend">
+            <span>low</span>
+            <div class="wf-ramp"></div>
+            <span>high amplitude</span>
+          </div>
         </div>
       </div>
 
@@ -596,49 +1442,69 @@
           Motion energy
         </div>
         <p class="desc">Mean frame-to-frame amplitude change for the selected node. Empty sits low and flat; moving spikes. Hover to inspect a point.</p>
-        <div class="chart-holder">
-          <svg id="energy" width="100%" height="140"></svg>
-          <div class="chart-tooltip" id="energy-tooltip"></div>
+        <div class="viewport">
+          <div class="chart-holder">
+            <svg id="energy" width="100%" height="140"></svg>
+            <div class="chart-tooltip" id="energy-tooltip"></div>
+          </div>
+          <div class="chart-legend"><span class="swatch"></span>Motion energy · mean |Δ amplitude| per frame</div>
         </div>
-        <div class="chart-legend"><span class="swatch"></span>Motion energy</div>
       </div>
     </section>
 
     <section class="card card-secondary">
       <div class="card-head">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
-        <h2>Session summary</h2>
+        <h2>Session</h2>
+        <span class="head-rule"></span>
       </div>
-      <p class="desc" style="margin-bottom:10px;">Tracks the combined (OR'd) prediction, not any single node.</p>
+      <p class="desc" style="margin-bottom:var(--space-5);">Tracks the combined (OR'd) prediction, not any single node.</p>
       <dl class="meta-grid session-meta">
-        <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>Uptime</dt><dd class="skeleton" id="stat-uptime">–</dd>
-        <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12 12 5l-8 7"/><path d="M6 10v9h12v-9"/></svg>Time empty</dt><dd class="skeleton" id="stat-empty-time">–</dd>
-        <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>Time moving</dt><dd class="skeleton" id="stat-moving-time">–</dd>
-        <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5 5 19"/><circle cx="6.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="17.5" r="1.5"/></svg>Occupancy</dt><dd class="skeleton" id="stat-occupancy">–<span class="unit">%</span></dd>
-        <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h11l-3-3M17 17H6l3 3"/></svg>State changes</dt><dd id="stat-changes">0</dd>
+        <div class="session-stat">
+          <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>Uptime</dt>
+          <dd class="skeleton" id="stat-uptime">–</dd>
+        </div>
+        <div class="session-stat">
+          <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12 12 5l-8 7"/><path d="M6 10v9h12v-9"/></svg>Empty</dt>
+          <dd class="skeleton" id="stat-empty-time">–</dd>
+        </div>
+        <div class="session-stat">
+          <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>Moving</dt>
+          <dd class="skeleton" id="stat-moving-time">–</dd>
+        </div>
+        <div class="session-stat">
+          <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5 5 19"/><circle cx="6.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="17.5" r="1.5"/></svg>Occupancy</dt>
+          <dd class="skeleton" id="stat-occupancy">–<span class="unit">%</span></dd>
+        </div>
+        <div class="session-stat">
+          <dt><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h11l-3-3M17 17H6l3 3"/></svg>Transitions</dt>
+          <dd id="stat-changes">0</dd>
+        </div>
       </dl>
       <div class="occ-track"><div class="occ-fill" id="occ-fill" style="width:0%"></div></div>
+      <div class="occ-caption"><span>empty</span><span>occupied</span></div>
     </section>
 
     <section class="card card-secondary">
       <div class="card-head">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/></svg>
-        <h2>Calibration</h2>
+        <h2>Calibration &amp; noise</h2>
+        <span class="head-rule"></span>
       </div>
 
       <div class="calib-node" data-node="A">
         <div class="calib-node-head"><span class="pill-dot" id="calib-node-dot-A"></span>Node A</div>
         <div class="stat-row">
-          <div class="stat-tile"><div class="label">Last recalibrated</div><div class="value skeleton" id="recal-last-A">–</div></div>
-          <div class="stat-tile"><div class="label">Count</div><div class="value" id="recal-count-A">0</div></div>
           <div class="stat-tile" id="noise-tile-A" title="Jitter as a fraction of received signal, measured while the room was empty. Scale-free, so nodes are directly comparable.">
-            <div class="label">Noise floor</div><div class="value skeleton" id="noise-A">–</div>
+            <div class="label">Empty-room noise floor</div>
+            <div class="value skeleton" id="noise-A">–</div>
           </div>
+          <div class="stat-tile"><div class="label">Last calibrated</div><div class="value skeleton" id="recal-last-A">–</div></div>
+          <div class="stat-tile"><div class="label">Recalibrations</div><div class="value" id="recal-count-A">0</div></div>
         </div>
         <button class="btn-secondary" data-recal-node="A">
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
-          Force recalibration — Node A
-        </button>
+          Recalibrate — Node A</button>
       </div>
 
       <div class="signal-divider node-b-hidden" id="calib-divider-B"></div>
@@ -646,19 +1512,22 @@
       <div class="calib-node node-b-hidden" data-node="B" id="calib-node-B">
         <div class="calib-node-head"><span class="pill-dot" id="calib-node-dot-B"></span>Node B</div>
         <div class="stat-row">
-          <div class="stat-tile"><div class="label">Last recalibrated</div><div class="value skeleton" id="recal-last-B">–</div></div>
-          <div class="stat-tile"><div class="label">Count</div><div class="value" id="recal-count-B">0</div></div>
           <div class="stat-tile" id="noise-tile-B" title="Jitter as a fraction of received signal, measured while the room was empty. Scale-free, so nodes are directly comparable.">
-            <div class="label">Noise floor</div><div class="value skeleton" id="noise-B">–</div>
+            <div class="label">Empty-room noise floor</div>
+            <div class="value skeleton" id="noise-B">–</div>
           </div>
+          <div class="stat-tile"><div class="label">Last calibrated</div><div class="value skeleton" id="recal-last-B">–</div></div>
+          <div class="stat-tile"><div class="label">Recalibrations</div><div class="value" id="recal-count-B">0</div></div>
         </div>
         <button class="btn-secondary" data-recal-node="B">
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
-          Force recalibration — Node B
-        </button>
+          Recalibrate — Node B</button>
       </div>
 
-      <p class="signal-compare-note" id="signal-compare-note" style="display:none"></p>
+      <!-- A div, not a p: the renderer fills this with a small bar chart, and
+           block children inside a paragraph would be reparented by the HTML
+           parser and break the layout. -->
+      <div class="signal-compare-note" id="signal-compare-note" style="display:none"></div>
 
       <ul class="recal-log" id="recal-log"></ul>
     </section>
@@ -796,6 +1665,7 @@ const predUpdated = document.getElementById('pred-updated');
 const canvas = document.getElementById('waterfall');
 const ctx = canvas.getContext('2d');
 const recalLogEl = document.getElementById('recal-log');
+const heroLive = document.getElementById('hero-live');
 let metaStarted = false; // first real RSSI/energy/buffer frame clears the skeleton placeholders
 
 function clearSkeleton(...els) { els.forEach(el => el && el.classList.remove('skeleton')); }
@@ -932,6 +1802,9 @@ setInterval(() => {
   else if (secs <= 8) setPill(espDot, espStatusText, 'warn', `Idle ${secs.toFixed(0)}s`);
   else setPill(espDot, espStatusText, 'bad', `No signal ${secs.toFixed(0)}s`);
   espDot.classList.toggle('live', secs <= 3);
+  // The hero's LIVE chip is driven by the same streaming check, so it is a
+  // measurement rather than a decoration: it goes quiet the moment frames do.
+  if (heroLive) heroLive.classList.toggle('is-live', secs <= 3);
 }, 500);
 
 function connect() {
@@ -975,7 +1848,10 @@ function selectNode(id) {
     sizeCanvasFor(node);
     drawWaterfallFor(node);
   } else {
+    // Switching to a node that has not streamed yet: say so, rather than
+    // leaving the previous node's picture up or showing a blank rectangle.
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (wfHolder) wfHolder.classList.remove('has-data');
   }
   drawEnergyFor(node);
 }
@@ -1028,7 +1904,9 @@ function applyMuteStyling(node) {
 // ---------------- Message routing ----------------
 function handleMessage(msg) {
   if (msg.type === 'error' || msg.type === 'warning') {
-    showBanner(msg.node ? `[node ${msg.node}] ${msg.message}` : msg.message);
+    // The whole message object, not a pre-flattened string: the node and the
+    // error/warning type carry the severity and the routing key.
+    showBanner(msg);
     return;
   }
   if (msg.type === 'init') {
@@ -1066,9 +1944,16 @@ function handleMessage(msg) {
     node.recalCount += 1;
     const countEl = document.getElementById(`recal-count-${node.id}`);
     if (countEl) countEl.textContent = node.recalCount;
+    // Instrument log line: time, which node, what happened, and the noise floor
+    // measured by that recalibration - so the log doubles as a record of how
+    // the room's noise drifted over the session.
     const li = document.createElement('li');
-    li.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>' +
-      `node ${node.id} · ` + new Date(msg.at_unix_ms).toLocaleTimeString();
+    const noise = typeof msg.noise_floor === 'number' ? msg.noise_floor.toFixed(3) : '—';
+    li.innerHTML =
+      `<span class="rl-time">${new Date(msg.at_unix_ms).toLocaleTimeString()}</span>` +
+      `<span class="rl-node">NODE ${node.id}</span>` +
+      `<span class="rl-event">recalibrated</span>` +
+      `<span class="rl-noise">noise ${noise}</span>`;
     recalLogEl.prepend(li);
     while (recalLogEl.children.length > 10) recalLogEl.removeChild(recalLogEl.lastChild);
     return;
@@ -1083,17 +1968,133 @@ function handleMessage(msg) {
   }
 }
 
-function showBanner(text) {
-  // The server sends an empty message to CLEAR a condition that has resolved
-  // (e.g. the AP went back to 20MHz after a channel-width change). Without
-  // this, a stale warning would stay on screen for the rest of the session.
-  if (!text || !text.trim()) {
-    banner.classList.remove('show');
+// ---------------- System conditions ----------------
+// Keyed by (kind, node), mirroring how the server keys the status it replays
+// to a reconnecting client. The previous single-slot banner had two real
+// faults: node B's warning overwrote node A's, and the empty "resolved"
+// message that ONE node sends (e.g. the AP returning to 20MHz) tore down the
+// banner while another node's condition was still live.
+const conditions = new Map();
+
+// Severity comes from the PROTOCOL, never from pattern-matching the wording -
+// the messages carry raw exception text and would be a fragile thing to parse:
+//   type 'error'                 -> fault: this node cannot work at all
+//                                   (csi_live_server.py, serial port open failed)
+//   type 'warning' + node '-'    -> the sustained-occupancy alert broadcast by
+//                                   alert_task, which is the system working
+//   type 'warning' + a real node -> that node is degraded but still streaming
+function classifyCondition(msg) {
+  if (msg.type === 'error') return 'fault';
+  if (msg.node === '-') return 'detection';
+  return 'degraded';
+}
+
+const CONDITION_META = {
+  fault: {
+    label: 'Fault',
+    icon: '<circle cx="12" cy="12" r="10" fill="currentColor"/>' +
+          '<rect x="11" y="6.4" width="2" height="7.2" rx="1" fill="#fff"/>' +
+          '<rect x="11" y="15.4" width="2" height="2" rx="1" fill="#fff"/>',
+  },
+  detection: {
+    label: 'Detection',
+    icon: '<path d="M12 2 22 20H2Z" fill="currentColor"/>' +
+          '<rect x="11" y="9" width="2" height="6" rx="1" fill="#fff"/>' +
+          '<rect x="11" y="16.3" width="2" height="2" rx="1" fill="#fff"/>',
+  },
+  degraded: {
+    label: 'Degraded',
+    icon: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" ' +
+          'fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>' +
+          '<path d="M12 9v4M12 17h.01" fill="none" stroke="currentColor" ' +
+          'stroke-width="1.8" stroke-linecap="round"/>',
+  },
+};
+
+const SEVERITY_ORDER = { fault: 0, detection: 1, degraded: 2 };
+
+function showBanner(msg) {
+  const key = `${msg.type}:${msg.node || '-'}`;
+  const text = (msg.message || '').trim();
+
+  // An empty message is the server RESOLVING exactly this condition.
+  if (!text) {
+    conditions.delete(key);
+    renderConditions();
     return;
   }
-  bannerText.textContent = text;
-  banner.classList.add('show');
+
+  const prev = conditions.get(key);
+  conditions.set(key, {
+    key,
+    severity: classifyCondition(msg),
+    node: msg.node && msg.node !== '-' ? msg.node : null,
+    message: text,
+    at: Date.now(),
+    // An identical repeat is counted rather than stacked, so one node flapping
+    // cannot bury every other condition under duplicates.
+    count: prev && prev.message === text ? prev.count + 1 : 1,
+  });
+  renderConditions();
 }
+
+function renderConditions() {
+  const items = Array.from(conditions.values()).sort((a, b) =>
+    (SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]) || (b.at - a.at));
+
+  banner.querySelectorAll('.alert').forEach(el => el.remove());
+
+  items.forEach(item => {
+    const meta = CONDITION_META[item.severity];
+    // The detection alert is about the monitored space rather than one board,
+    // which is why the server tags it node "-".
+    const chip = item.node ? `Node ${item.node}`
+               : (item.severity === 'detection' ? 'Room' : null);
+
+    const el = document.createElement('div');
+    el.className = 'alert alert-' + item.severity;
+    el.dataset.key = item.key;
+    el.innerHTML =
+      `<svg class="alert-icon" viewBox="0 0 24 24">${meta.icon}</svg>` +
+      '<div class="alert-body">' +
+        '<div class="alert-head">' +
+          `<span class="alert-kind">${meta.label}</span>` +
+          (chip ? `<span class="alert-node">${chip}</span>` : '') +
+          (item.count > 1 ? `<span class="alert-count">&times;${item.count}</span>` : '') +
+          `<span class="alert-time">${new Date(item.at).toLocaleTimeString()}</span>` +
+        '</div>' +
+        '<p class="alert-msg"></p>' +
+      '</div>' +
+      '<button class="alert-dismiss" type="button" aria-label="Acknowledge this condition" ' +
+              'title="Acknowledge. This hides the message; it does not fix the condition, ' +
+              'and it will reappear if the server reports it again.">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+             'stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>' +
+      '</button>';
+    // textContent, never innerHTML: the message carries raw serial/exception
+    // text straight from the server and must not be parsed as markup.
+    el.querySelector('.alert-msg').textContent = item.message;
+    banner.appendChild(el);
+  });
+
+  const newest = items.length ? items.reduce((a, b) => (a.at >= b.at ? a : b)) : null;
+  bannerText.textContent = newest
+    ? `${CONDITION_META[newest.severity].label}${newest.node ? ' on node ' + newest.node : ''}: ${newest.message}`
+    : '';
+  banner.classList.toggle('show', items.length > 0);
+}
+
+// Acknowledging removes the row. It does NOT resolve the underlying condition -
+// most of these never send a clear - so the wording and tooltip say so, and the
+// row returns if the server reports it again (it replays status on reconnect).
+banner.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('.alert-dismiss');
+  if (!btn) return;
+  const host = btn.closest('.alert');
+  if (!host) return;
+  conditions.delete(host.dataset.key);
+  renderConditions();
+});
 
 // How disturbed the room looks while EMPTY, measured during calibration.
 // This is the strongest predictor of how well the system can work right now -
@@ -1118,12 +2119,18 @@ function updateNoiseFloor(node, msg) {
   const tile = document.getElementById(`noise-tile-${node.id}`);
   if (!el || !tile) return;
   clearSkeleton(el);
-  el.innerHTML = '';
-  el.appendChild(document.createTextNode(msg.noise_floor.toFixed(3)));
-  const word = document.createElement('span');
-  word.className = 'noise-label';
-  word.textContent = NOISE_WORDS[msg.noise_level] || msg.noise_level || '';
-  el.appendChild(word);
+  // Shown as a meter as well as a figure. The bar runs 0 to NOISE_FULL_SCALE
+  // with ticks at the two graded boundaries, so "how noisy is my room" is
+  // answerable at a glance while the exact value stays on screen for anyone
+  // who needs it. Nothing here is invented: the scale ends are constants and
+  // the position is the measured value.
+  const NOISE_FULL_SCALE = 0.30;
+  const pct = Math.max(0, Math.min(1, msg.noise_floor / NOISE_FULL_SCALE)) * 100;
+  el.innerHTML =
+    `<span class="noise-figure">${msg.noise_floor.toFixed(3)}</span>` +
+    `<span class="noise-label">${NOISE_WORDS[msg.noise_level] || msg.noise_level || ''}</span>` +
+    `<div class="noise-meter"><div class="noise-meter-fill" style="width:${pct.toFixed(1)}%"></div><i></i><i></i></div>` +
+    `<div class="noise-scale"><span>quiet</span><span>moderate</span><span>loud</span></div>`;
   tile.className = 'stat-tile noise-' + (msg.noise_level || 'quiet');
   let tip = msg.noise_headline || '';
   if (typeof msg.amp_scale === 'number') {
@@ -1149,11 +2156,29 @@ function compareNodeSignals() {
   if (weak.ampScale >= strong.ampScale * 0.7) { note.style.display = 'none'; return; }
   const pct = Math.round(100 * (1 - weak.ampScale / strong.ampScale));
   note.style.display = '';
-  note.textContent = `Node ${weak.id} receives ${pct}% less signal than node ${strong.id} `
-    + `(amplitude ${weak.ampScale.toFixed(1)} vs ${strong.ampScale.toFixed(1)}). `
-    + `That is a reception issue — check its antenna and placement, and try swapping `
-    + `the two boards' positions to see whether the problem follows the board or the spot.`;
+  // Drawn to scale against the stronger node, so the disparity is visible as a
+  // shape before the sentence is read. Both amplitudes are measured values.
+  const weakPct = (weak.ampScale / strong.ampScale) * 100;
+  note.innerHTML =
+    `<span class="sb-title">Signal balance</span>` +
+    `<span class="sb-lead">Node ${weak.id} receives ${pct}% less signal than node ${strong.id}.</span>` +
+    `<div class="sb-bars">` +
+      `<span>${strong.id}</span>` +
+      `<span class="sb-track"><span class="sb-fill is-strong" style="width:100%"></span></span>` +
+      `<span class="sb-val">${strong.ampScale.toFixed(1)}</span>` +
+      `<span>${weak.id}</span>` +
+      `<span class="sb-track"><span class="sb-fill" style="width:${weakPct.toFixed(1)}%"></span></span>` +
+      `<span class="sb-val">${weak.ampScale.toFixed(1)}</span>` +
+    `</div>` +
+    `That is a reception issue rather than a noisy room — check node ${weak.id}'s antenna ` +
+    `and placement, and try swapping the two boards' positions to see whether the problem ` +
+    `follows the board or the spot.`;
 }
+
+// Startup only. Once the system has produced any confirmed reading, the hero
+// belongs entirely to onCombined() and nothing here may touch it again - a
+// node restarting calibration must never be able to paint over a live MOVING.
+let heroEverConfirmed = false;
 
 function updateTopCalibPill() {
   const calibrating = Object.values(nodes).filter(n => n.discovered && n.calibText);
@@ -1161,6 +2186,19 @@ function updateTopCalibPill() {
     setPill(calibDot, calibStatusText, 'warn', calibrating.map(n => `${n.id}: ${n.calibText}`).join(' · '));
   } else {
     setPill(calibDot, calibStatusText, 'good', 'Ready');
+  }
+
+  // Before the first reading, say WHICH transitional state this is. "Warming
+  // up" and "establishing the baseline" call for different things from the
+  // person watching - the second one means "stay out of the room" - and the
+  // countdown is already known here, so withholding it helped nobody.
+  if (heroEverConfirmed) return;
+  if (calibrating.length > 0) {
+    const left = calibrating.map(n => `${n.id}: ${n.calibText.replace('Calibrating ', '')}`).join(' · ');
+    setBadge('calibrating', 'calib', 'Calibrating',
+             `establishing the empty-room baseline — leave the room · ${left}`);
+  } else {
+    setBadge('warming', 'warm', 'Warming up…', 'collecting enough signal to make a call');
   }
 }
 
@@ -1251,6 +2289,17 @@ function onFrameInner(node, msg) {
   if (rssiEl) rssiEl.textContent = `${msg.rssi.toFixed(0)} dBm`;
   if (energyEl) energyEl.textContent = msg.energy !== null ? msg.energy.toFixed(2) : '–';
 
+  // Reception bar on the sensor module, mapped from this node's real RSSI over
+  // the range that actually matters for CSI here: about -85dBm (barely
+  // receiving, and where int8 quantisation noise starts to dominate) up to
+  // -35dBm (strong). Purely a presentation of msg.rssi - nothing is smoothed
+  // or synthesised, and with no frames yet the bar stays at zero.
+  const tileEl = document.getElementById(`tile-${node.id}`);
+  if (tileEl) {
+    const strength = Math.max(0, Math.min(1, (msg.rssi + 85) / 50)) * 100;
+    tileEl.style.setProperty('--signal', `${strength.toFixed(0)}%`);
+  }
+
   if (msg.energy !== null) {
     node.energyHistory.push(msg.energy);
     if (node.energyHistory.length > ENERGY_HISTORY) node.energyHistory.shift();
@@ -1318,7 +2367,14 @@ function onCombined(msg) {
 
   const overall = msg.prediction; // 'EMPTY' | 'MOVING' | null
   const ids = Object.keys(msg.nodes);
-  const voting = ids.filter(id => !mutedIds.has(id));
+  // Whoever is actually counted, matching compute_combined() on the server:
+  // muted AND offline nodes are both excluded. Leaving OFFLINE in here meant
+  // that with one node muted and the other dead the page said "waiting for
+  // calibration to finish" while in truth nothing was being counted at all -
+  // understating the degradation, which is the one thing this readout must
+  // never do. It also kept the confidence gauge hidden whenever a second node
+  // was offline, even though a single node was then the sole voter.
+  const voting = ids.filter(id => !mutedIds.has(id) && msg.nodes[id] !== 'OFFLINE');
   const single = voting.length === 1 ? nodes[voting[0]] : null;
 
   if (overall === null) {
@@ -1328,6 +2384,7 @@ function onCombined(msg) {
     setBadge('warming', 'warm', 'Warming up…', why);
     return;
   }
+  heroEverConfirmed = true;
   const isMoving = overall === 'MOVING';
   const note = describeCombined(msg.nodes, overall, mutedIds) ||
     (single && typeof single.confidence === 'number' ? `${Math.round(single.confidence * 100)}% confidence` : '');
@@ -1349,18 +2406,28 @@ function hexToRgb(hex) {
   return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
 }
 
-const seqLo = getComputedStyle(document.documentElement).getPropertyValue('--seq-lo').trim() || '#cde2fb';
-const seqHi = getComputedStyle(document.documentElement).getPropertyValue('--seq-hi').trim() || '#104281';
+// Sampled ONCE at load, so these must not be theme-dependent - the waterfall
+// lives on a fixed dark instrument surface in both themes precisely so this
+// ramp is stable. Three stops rather than two: a single navy->cyan blend
+// washes out the mid-range where most subcarrier amplitude actually sits.
+const seqLo  = getComputedStyle(document.documentElement).getPropertyValue('--seq-lo').trim()  || '#06101e';
+const seqMid = getComputedStyle(document.documentElement).getPropertyValue('--seq-mid').trim() || '#17588f';
+const seqHi  = getComputedStyle(document.documentElement).getPropertyValue('--seq-hi').trim()  || '#6fd3f2';
+const wfHolder = document.getElementById('wf-holder');
 
 function drawWaterfallFor(node) {
   if (!node.waterfallData || node.id !== selectedNode) return;
+  // Reveals the canvas and retires the "no signal" placeholder. Driven by real
+  // frames arriving, never by a timer.
+  if (wfHolder) wfHolder.classList.add('has-data');
   const img = ctx.createImageData(node.nActive, HISTORY_ROWS);
   const [lo, hi] = node.clim || [0, 1];
   const range = Math.max(1e-6, hi - lo);
   for (let i = 0; i < node.waterfallData.length; i++) {
     let t = (node.waterfallData[i] - lo) / range;
     t = Math.max(0, Math.min(1, t));
-    const [r, g, b] = mixColor(seqLo, seqHi, t);
+    const [r, g, b] = t < 0.5 ? mixColor(seqLo, seqMid, t * 2)
+                              : mixColor(seqMid, seqHi, (t - 0.5) * 2);
     const o = i * 4;
     img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = 255;
   }
@@ -1406,10 +2473,22 @@ function drawEnergyFor(node) {
     area += `L ${lastX.toFixed(1)} ${padT + plotH} Z`;
   }
 
+  // Current-value readout pinned to the live end of the trace, the way a scope
+  // annotates its cursor. Clamped inside the plot so it cannot clip at either
+  // extreme, and anchored to the left of the endpoint because the trace always
+  // grows toward the right edge.
+  let readout = '';
+  if (n > 0) {
+    const labelY = Math.max(padT + 11, Math.min(padT + plotH - 5, lastY - 10));
+    readout = `<text class="energy-readout" x="${(lastX - 8).toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="end">`
+            + `${energyHistory[n - 1].toFixed(2)}</text>`;
+  }
+
   svg.innerHTML = gridHtml +
     `<path class="energy-area" d="${area}" />` +
     `<path class="energy-path" d="${path}" />` +
-    (n > 0 ? `<circle class="energy-endpoint" cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" />` : '');
+    (n > 0 ? `<circle class="energy-endpoint" cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="3.5" />` : '') +
+    readout;
 }
 
 // Small reactive waveform behind the hero badge label - the SELECTED
@@ -1448,7 +2527,9 @@ svg.addEventListener('mousemove', (ev) => {
   const holderRect = energyHolder.getBoundingClientRect();
   energyTooltip.style.left = `${ev.clientX - holderRect.left}px`;
   energyTooltip.style.top = `${ev.clientY - holderRect.top}px`;
-  energyTooltip.textContent = `energy: ${value.toFixed(2)}`;
+  // Labelled so the number is not ambiguous, and tagged with the node it came
+  // from - the chart follows the selected node and the tooltip should say so.
+  energyTooltip.innerHTML = `<b>Motion energy · node ${selectedNode}</b>${value.toFixed(3)}`;
   energyTooltip.classList.add('show');
 });
 svg.addEventListener('mouseleave', () => energyTooltip.classList.remove('show'));
